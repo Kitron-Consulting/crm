@@ -147,6 +147,10 @@ CRM_DATA=~/leads.json crm due
 
 Most CRMs are overkill for a solo practice. You don't need dashboards, integrations, or a monthly fee. You need to know who to follow up with tomorrow.
 
+## Author
+
+Eemil Kiviahde — [Kitron Consulting](https://kitron.dev)
+
 ## License
 
 MIT
