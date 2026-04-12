@@ -72,6 +72,32 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Colors — disabled if not a terminal
+if sys.stdout.isatty():
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    RESET = "\033[0m"
+else:
+    BOLD = DIM = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = RESET = ""
+
+STAGE_COLOR_CYCLE = [DIM, BLUE, CYAN, YELLOW, MAGENTA]
+STAGE_COLOR_SPECIAL = {"won": GREEN, "lost": RED, "dormant": DIM}
+
+def stage_color(stage, stages):
+    if stage in STAGE_COLOR_SPECIAL:
+        return STAGE_COLOR_SPECIAL[stage]
+    try:
+        idx = stages.index(stage)
+    except ValueError:
+        return ""
+    return STAGE_COLOR_CYCLE[idx % len(STAGE_COLOR_CYCLE)]
+
 # Data file location — same directory as script
 DATA_FILE = Path(__file__).parent / "crm_data.json"
 
@@ -167,10 +193,10 @@ def pick_one(items, prompt="Select", format_fn=None):
     if format_fn is None:
         format_fn = str
     
-    print(f"\n{prompt}:")
+    print(f"\n{BOLD}{prompt}:{RESET}")
     for i, item in enumerate(items, 1):
-        print(f"  {i}. {format_fn(item)}")
-    print(f"  0. Cancel")
+        print(f"  {DIM}{i}.{RESET} {format_fn(item)}")
+    print(f"  {DIM}0. Cancel{RESET}")
     
     try:
         choice = input("\n> ").strip()
@@ -185,23 +211,28 @@ def pick_one(items, prompt="Select", format_fn=None):
         print()
         return None
 
-def format_contact_option(c):
+def format_contact_option(c, stages=None):
     role = c.get('role', '')
-    role_str = f" — {role}" if role else ""
-    return f"{c['name']} ({c['company']}{role_str}) [{c['stage'].upper()}]"
+    role_str = f" {DIM}—{RESET} {CYAN}{role}{RESET}" if role else ""
+    s = c['stage']
+    sc = stage_color(s, stages or [])
+    return f"{BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{role_str}{DIM}){RESET} {sc}[{s.upper()}]{RESET}"
 
 def pick_contact_from_all(data, prompt="Select contact"):
     """Pick any contact interactively."""
     stages = get_stages(data)
     order = {s: i for i, s in enumerate(stages)}
     contacts = sorted(data["contacts"], key=lambda c: (order.get(c["stage"], 99), c["name"]))
-    return pick_one(contacts, prompt=prompt, format_fn=format_contact_option)
+    fmt = lambda c: format_contact_option(c, stages)
+    return pick_one(contacts, prompt=prompt, format_fn=fmt)
 
-def pick_contact_from_matches(matches):
+def pick_contact_from_matches(data, matches):
     """Pick from search results."""
     if len(matches) == 1:
         return matches[0]
-    return pick_one(matches, prompt="Multiple matches", format_fn=format_contact_option)
+    stages = get_stages(data)
+    fmt = lambda c: format_contact_option(c, stages)
+    return pick_one(matches, prompt="Multiple matches", format_fn=fmt)
 
 def find_contact(data, query):
     query = query.lower()
@@ -218,7 +249,7 @@ def get_contact(data, query=None, prompt="Select contact"):
         if not matches:
             print(f"No contacts matching '{query}'")
             return None
-        return pick_contact_from_matches(matches)
+        return pick_contact_from_matches(data, matches)
     else:
         return pick_contact_from_all(data, prompt)
 
@@ -235,14 +266,22 @@ def parse_date(s, tz=None):
         return None
     return s
 
-def format_contact_line(c):
-    stage = c["stage"].upper()
+def format_contact_line(c, stages=None, today=None):
+    s = c["stage"]
+    sc = stage_color(s, stages or [])
     due = c.get("next_date", "")
     action = c.get("next_action", "")
-    due_str = f" → {due}: {action}" if due and action else ""
+    if due and action:
+        overdue = today and due < today
+        if overdue:
+            due_str = f" {DIM}→{RESET} {RED}{BOLD}{due}{RESET}{DIM}:{RESET} {RED}{action}{RESET}"
+        else:
+            due_str = f" {DIM}→{RESET} {GREEN}{due}{RESET}{DIM}:{RESET} {action}"
+    else:
+        due_str = ""
     role = c.get('role', '')
-    role_str = f" — {role}" if role else ""
-    return f"  {c['name']} ({c['company']}{role_str}) [{stage}]{due_str}"
+    role_str = f" {DIM}—{RESET} {CYAN}{role}{RESET}" if role else ""
+    return f"  {BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{role_str}{DIM}){RESET} {sc}[{s.upper()}]{RESET}{due_str}"
 
 def cmd_list(args):
     if len(args) > 1:
@@ -262,11 +301,15 @@ def cmd_list(args):
             by_stage[stage] = []
         by_stage[stage].append(c)
     
-    for stage in get_stages(data):
+    stages = get_stages(data)
+    tz = get_tz(data)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    for stage in stages:
         if stage in by_stage:
-            print(f"\n{stage.upper()} ({len(by_stage[stage])})")
+            sc = stage_color(stage, stages)
+            print(f"\n{sc}{BOLD}{stage.upper()}{RESET} ({len(by_stage[stage])})")
             for c in sorted(by_stage[stage], key=lambda x: x.get("next_date") or "z"):
-                print(format_contact_line(c))
+                print(format_contact_line(c, stages, today))
     print()
 
 def cmd_show(args):
@@ -278,18 +321,25 @@ def cmd_show(args):
     if not c:
         return
     
-    print(f"\n{'='*50}")
-    print(f"{c['name']} — {c['company']}")
-    print(f"{'='*50}")
-    print(f"Email:   {c['email']}")
-    print(f"Phone:   {c.get('phone', '')}")
-    print(f"Role:    {c.get('role', '')}")
-    print(f"Source:  {c.get('source', '')}")
-    print(f"Stage:   {c['stage'].upper()}")
-    print(f"Next:    {c.get('next_date', '')} — {c.get('next_action', '')}")
-    print(f"\nNotes:")
+    stages = get_stages(data)
+    sc = stage_color(c['stage'], stages)
+    print(f"\n{DIM}{'='*50}{RESET}")
+    print(f"{BOLD}{c['name']}{RESET} {DIM}—{RESET} {c['company']}")
+    print(f"{DIM}{'='*50}{RESET}")
+    print(f"  {DIM}Email:{RESET}   {CYAN}{c['email']}{RESET}")
+    print(f"  {DIM}Phone:{RESET}   {CYAN}{c.get('phone', '')}{RESET}")
+    print(f"  {DIM}Role:{RESET}    {c.get('role', '')}")
+    print(f"  {DIM}Source:{RESET}  {c.get('source', '')}")
+    print(f"  {DIM}Stage:{RESET}   {sc}{BOLD}{c['stage'].upper()}{RESET}")
+    next_date = c.get('next_date', '')
+    next_action = c.get('next_action', '')
+    if next_date and next_action:
+        print(f"  {DIM}Next:{RESET}    {GREEN}{next_date}{RESET} {DIM}—{RESET} {next_action}")
+    else:
+        print(f"  {DIM}Next:{RESET}    {DIM}none{RESET}")
+    print(f"\n  {BOLD}Notes:{RESET}")
     for note in c.get("notes", []):
-        print(f"  [{note['date']}] {note['text']}")
+        print(f"    {DIM}[{note['date']}]{RESET} {note['text']}")
     print()
 
 def cmd_note(args):
@@ -321,7 +371,7 @@ def cmd_note(args):
     c["notes"].insert(0, {"date": stamp, "text": note_text})
 
     save_data(data)
-    print(f"Added note to {c['name']}")
+    print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
 
 def cmd_stage(args):
     if len(args) > 2:
@@ -358,7 +408,7 @@ def cmd_stage(args):
     c["notes"].insert(0, {"date": stamp, "text": f"Stage: {old_stage} → {new_stage}"})
     
     save_data(data)
-    print(f"{c['name']}: {old_stage} → {new_stage}")
+    print(f"{BOLD}{c['name']}{RESET}: {DIM}{old_stage}{RESET} → {GREEN}{new_stage}{RESET}")
 
 def cmd_next(args):
     if len(args) > 3:
@@ -396,7 +446,7 @@ def cmd_next(args):
     c["next_date"] = parsed
     
     save_data(data)
-    print(f"{c['name']}: next → {c['next_action']} ({c['next_date']})")
+    print(f"{BOLD}{c['name']}{RESET}: next → {c['next_action']} {DIM}({RESET}{GREEN}{c['next_date']}{RESET}{DIM}){RESET}")
 
 def cmd_due(args):
     if len(args) > 1:
@@ -419,15 +469,16 @@ def cmd_due(args):
         elif next_date <= cutoff:
             due.append(c)
     
+    stages = get_stages(data)
     if overdue:
-        print(f"\nOVERDUE ({len(overdue)})")
+        print(f"\n{RED}{BOLD}OVERDUE ({len(overdue)}){RESET}")
         for c in sorted(overdue, key=lambda x: x["next_date"]):
-            print(format_contact_line(c))
-    
+            print(format_contact_line(c, stages, today))
+
     if due:
-        print(f"\nDUE WITHIN {days} DAYS ({len(due)})")
+        print(f"\n{YELLOW}{BOLD}DUE WITHIN {days} DAYS ({len(due)}){RESET}")
         for c in sorted(due, key=lambda x: x["next_date"]):
-            print(format_contact_line(c))
+            print(format_contact_line(c, stages, today))
     
     if not due and not overdue:
         print(f"Nothing due within {days} days")
@@ -484,7 +535,7 @@ def cmd_add(args):
     
     data["contacts"].append(contact)
     save_data(data)
-    print(f"Added {name}")
+    print(f"{GREEN}Added {BOLD}{name}{RESET}")
 
 def cmd_edit(args):
     if len(args) > 1:
@@ -512,7 +563,7 @@ def cmd_edit(args):
             updated = json.load(f)
         data["contacts"][idx] = updated
         save_data(data)
-        print(f"Updated {updated['name']}")
+        print(f"{GREEN}Updated {BOLD}{updated['name']}{RESET}")
     except Exception as e:
         print(f"Error: {e}")
     finally:
@@ -543,7 +594,7 @@ def cmd_rm(args):
     c["removed_at"] = stamp
     data["removed"].append(c)
     save_data(data)
-    print(f"Removed {c['name']}")
+    print(f"{YELLOW}Removed {BOLD}{c['name']}{RESET}")
 
 def cmd_restore(args):
     if len(args) > 1:
@@ -585,7 +636,7 @@ def cmd_restore(args):
     del c["removed_at"]
     data["contacts"].append(c)
     save_data(data)
-    print(f"Restored {c['name']} ({c['company']})")
+    print(f"{GREEN}Restored {BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{DIM}){RESET}")
 
 def cmd_config(args):
     data = load_data()
@@ -643,7 +694,7 @@ def cmd_add_stage(args):
         return
     stages.append(name)
     save_data(data)
-    print(f"Added stage: {name}")
+    print(f"{GREEN}Added stage: {BOLD}{name}{RESET}")
 
 def cmd_rm_stage(args):
     if not args:
@@ -661,7 +712,7 @@ def cmd_rm_stage(args):
         return
     stages.remove(name)
     save_data(data)
-    print(f"Removed stage: {name}")
+    print(f"{YELLOW}Removed stage: {BOLD}{name}{RESET}")
 
 def cmd_search(args):
     if not args:
@@ -696,13 +747,15 @@ def cmd_search(args):
         print(f"No results for '{term}'")
         return
     
-    print(f"\nFound {len(results)} contact(s):\n")
+    stages = get_stages(data)
+    print(f"\n{BOLD}Found {len(results)} contact(s):{RESET}\n")
     for c, matches in results:
-        print(f"{c['name']} ({c['company']}) [{c['stage'].upper()}]")
-        for m in matches[:3]:  # Show max 3 matches per contact
-            print(f"    → {m}")
+        sc = stage_color(c['stage'], stages)
+        print(f"{BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{DIM}){RESET} {sc}[{c['stage'].upper()}]{RESET}")
+        for m in matches[:3]:
+            print(f"    {DIM}→{RESET} {m}")
         if len(matches) > 3:
-            print(f"    → ...and {len(matches) - 3} more")
+            print(f"    {DIM}→ ...and {len(matches) - 3} more{RESET}")
         print()
 
 HELP = {
