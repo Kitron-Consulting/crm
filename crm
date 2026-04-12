@@ -34,6 +34,8 @@ COMMANDS
   
   stages                 Show valid stage names
 
+  config [KEY] [VALUE]   Get/set config (e.g., timezone)
+
 EXAMPLES
   crm due                What's due this week?
   crm due 14             What's due in the next 2 weeks?
@@ -61,7 +63,7 @@ import json
 import sys
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Data file location — same directory as script
@@ -75,6 +77,31 @@ def load_data():
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {"contacts": []}
+
+def _parse_tz(tz_str):
+    """Parse a timezone string like 'UTC+03:00' or 'UTC-05:00' into a timezone object."""
+    if tz_str == "UTC":
+        return timezone.utc
+    sign = 1 if "+" in tz_str else -1
+    parts = tz_str.split("+")[-1].split("-")[-1]
+    h, m = parts.split(":")
+    return timezone(timedelta(hours=sign * int(h), minutes=sign * int(m)))
+
+def get_tz(data):
+    tz_str = data.get("timezone")
+    if not tz_str:
+        local_tz = datetime.now().astimezone().tzinfo
+        offset = local_tz.utcoffset(datetime.now())
+        total = int(offset.total_seconds())
+        sign = "+" if total >= 0 else "-"
+        total = abs(total)
+        hours, remainder = divmod(total, 3600)
+        minutes = remainder // 60
+        tz_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
+        data["timezone"] = tz_str
+        save_data(data)
+        print(f"Timezone set to {tz_str}. Change with: crm config timezone UTC+XX:XX")
+    return _parse_tz(tz_str)
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -142,12 +169,12 @@ def get_contact(data, query=None, prompt="Select contact"):
     else:
         return pick_contact_from_all(data, prompt)
 
-def parse_date(s):
+def parse_date(s, tz=None):
     if not s:
         return ""
     if s.startswith("+") and s.endswith("d"):
         days = int(s[1:-1])
-        return (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+        return (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
     return s
 
 def format_contact_line(c):
@@ -193,7 +220,6 @@ def cmd_show(args):
     print(f"Role:    {c.get('role', '')}")
     print(f"Source:  {c.get('source', '')}")
     print(f"Stage:   {c['stage'].upper()}")
-    print(f"Last:    {c.get('last_contact', '')}")
     print(f"Next:    {c.get('next_date', '')} — {c.get('next_action', '')}")
     print(f"\nNotes:")
     for note in c.get("notes", []):
@@ -219,12 +245,11 @@ def cmd_note(args):
             print("Cancelled.")
             return
     
-    today = datetime.now().strftime("%Y-%m-%d")
+    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
     if "notes" not in c:
         c["notes"] = []
-    c["notes"].insert(0, {"date": today, "text": note_text})
-    c["last_contact"] = today
-    
+    c["notes"].insert(0, {"date": stamp, "text": note_text})
+
     save_data(data)
     print(f"Added note to {c['name']}")
 
@@ -253,10 +278,10 @@ def cmd_stage(args):
     old_stage = c["stage"]
     c["stage"] = new_stage
     
-    today = datetime.now().strftime("%Y-%m-%d")
+    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
     if "notes" not in c:
         c["notes"] = []
-    c["notes"].insert(0, {"date": today, "text": f"Stage: {old_stage} → {new_stage}"})
+    c["notes"].insert(0, {"date": stamp, "text": f"Stage: {old_stage} → {new_stage}"})
     
     save_data(data)
     print(f"{c['name']}: {old_stage} → {new_stage}")
@@ -286,17 +311,17 @@ def cmd_next(args):
         date = input("Due date (YYYY-MM-DD or +7d) [+7d]: ").strip() or "+7d"
     
     c["next_action"] = action
-    c["next_date"] = parse_date(date)
+    c["next_date"] = parse_date(date, get_tz(data))
     
     save_data(data)
     print(f"{c['name']}: next → {c['next_action']} ({c['next_date']})")
 
 def cmd_due(args):
-    days = int(args[0]) if args else 7
-    cutoff = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
-    today = datetime.now().strftime("%Y-%m-%d")
-    
     data = load_data()
+    tz = get_tz(data)
+    days = int(args[0]) if args else 7
+    cutoff = (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
+    today = datetime.now(tz).strftime("%Y-%m-%d")
     due = []
     overdue = []
     
@@ -336,8 +361,8 @@ def cmd_add(args):
     source = input("  Source (cold/referral/inbound): ").strip() or "cold"
     
     data = load_data()
-    today = datetime.now().strftime("%Y-%m-%d")
-    
+    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+
     contact = {
         "name": name,
         "email": email,
@@ -346,10 +371,9 @@ def cmd_add(args):
         "role": role,
         "source": source,
         "stage": "cold",
-        "last_contact": today,
         "next_action": "",
         "next_date": "",
-        "notes": [{"date": today, "text": "Added to CRM"}]
+        "notes": [{"date": stamp, "text": "Added to CRM"}]
     }
     
     data["contacts"].append(contact)
@@ -399,6 +423,48 @@ def cmd_rm(args):
     data["contacts"].remove(c)
     save_data(data)
     print(f"Removed {c['name']}")
+
+def cmd_config(args):
+    data = load_data()
+
+    if not args:
+        # Show all config
+        has_config = False
+        for k, v in data.items():
+            if k == "contacts":
+                continue
+            print(f"  {k} = {v}")
+            has_config = True
+        if not has_config:
+            print("No config set.")
+        return
+
+    key = args[0]
+    if key == "contacts":
+        print("Use other commands to manage contacts.")
+        return
+
+    if len(args) == 1:
+        # Get
+        if key in data:
+            print(f"  {key} = {data[key]}")
+        else:
+            print(f"  {key} not set")
+        return
+
+    # Set
+    value = " ".join(args[1:])
+
+    if key == "timezone":
+        try:
+            _parse_tz(value)
+        except (ValueError, IndexError):
+            print(f"Invalid timezone: {value}. Use format like UTC+03:00")
+            return
+
+    data[key] = value
+    save_data(data)
+    print(f"  {key} = {value}")
 
 def cmd_stages(args):
     print("Stages:")
@@ -470,6 +536,8 @@ def main():
         "search": cmd_search,
         "find": cmd_search,
         "stages": cmd_stages,
+        "config": cmd_config,
+        "cfg": cmd_config,
     }
     
     if cmd in commands:
