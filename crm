@@ -26,15 +26,17 @@ COMMANDS
   
   edit [QUERY]           Open contact in $EDITOR (default: nano)
   
-  add                    Add new contact (interactive)
-  
-  rm [QUERY]             Remove a contact (soft delete)
+  add contact             Add new contact (interactive)
+  add stage [NAME]       Add a stage
+
+  rm contact [QUERY]     Remove a contact (soft delete)
+  rm stage [NAME]        Remove a stage (if empty)
 
   restore [QUERY]        Restore a removed contact
 
   search TERM            Search across all contacts and notes
   
-  stages                 Show valid stage names
+  stages                 List stages
 
   config [KEY] [VALUE]   Get/set config (e.g., timezone)
 
@@ -71,14 +73,57 @@ from pathlib import Path
 # Data file location — same directory as script
 DATA_FILE = Path(__file__).parent / "crm_data.json"
 
-STAGES = ["cold", "contacted", "responded", "meeting", "proposal", "won", "lost", "dormant"]
-STAGE_ORDER = {s: i for i, s in enumerate(STAGES)}
+DEFAULT_STAGES = ["cold", "contacted", "responded", "meeting", "proposal", "won", "lost", "dormant"]
+CURRENT_VERSION = 2
+
+# --- Migrations ---
+# Key = target version. Only add an entry when the schema actually changes.
+
+def migrate_to_1(data):
+    """Initial schema: ensure config, stages, removed exist. Move top-level timezone to config."""
+    if "config" not in data:
+        data["config"] = {}
+    if "timezone" in data:
+        data["config"]["timezone"] = data.pop("timezone")
+    if "removed" not in data:
+        data["removed"] = []
+    if "last_contact" in data:
+        del data["last_contact"]
+    for c in data.get("contacts", []):
+        c.pop("last_contact", None)
+
+def migrate_to_2(data):
+    """Move stages from top-level into config."""
+    if "stages" in data:
+        data["config"]["stages"] = data.pop("stages")
+    if "stages" not in data["config"]:
+        data["config"]["stages"] = DEFAULT_STAGES[:]
+
+MIGRATIONS = {
+    1: migrate_to_1,
+    2: migrate_to_2,
+}
+
+def get_stages(data):
+    return data["config"]["stages"]
 
 def load_data():
     if DATA_FILE.exists():
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"contacts": []}
+            data = json.load(f)
+    else:
+        data = {"contacts": []}
+
+    version = data.get("version", 0)
+    if version < CURRENT_VERSION:
+        while version < CURRENT_VERSION:
+            version += 1
+            if version in MIGRATIONS:
+                MIGRATIONS[version](data)
+        data["version"] = CURRENT_VERSION
+        save_data(data)
+
+    return data
 
 def _parse_tz(tz_str):
     """Parse a timezone string like 'UTC+03:00' or 'UTC-05:00' into a timezone object."""
@@ -90,7 +135,8 @@ def _parse_tz(tz_str):
     return timezone(timedelta(hours=sign * int(h), minutes=sign * int(m)))
 
 def get_tz(data):
-    tz_str = data.get("timezone")
+    cfg = data["config"]
+    tz_str = cfg.get("timezone")
     if not tz_str:
         local_tz = datetime.now().astimezone().tzinfo
         offset = local_tz.utcoffset(datetime.now())
@@ -100,7 +146,8 @@ def get_tz(data):
         hours, remainder = divmod(total, 3600)
         minutes = remainder // 60
         tz_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
-        data["timezone"] = tz_str
+        cfg["timezone"] = tz_str
+        data["config"] = cfg
         save_data(data)
         print(f"Timezone set to {tz_str}. Change with: crm config timezone UTC+XX:XX")
     return _parse_tz(tz_str)
@@ -143,7 +190,9 @@ def format_contact_option(c):
 
 def pick_contact_from_all(data, prompt="Select contact"):
     """Pick any contact interactively."""
-    contacts = sorted(data["contacts"], key=lambda c: (STAGE_ORDER.get(c["stage"], 99), c["name"]))
+    stages = get_stages(data)
+    order = {s: i for i, s in enumerate(stages)}
+    contacts = sorted(data["contacts"], key=lambda c: (order.get(c["stage"], 99), c["name"]))
     return pick_one(contacts, prompt=prompt, format_fn=format_contact_option)
 
 def pick_contact_from_matches(matches):
@@ -177,6 +226,11 @@ def parse_date(s, tz=None):
     if s.startswith("+") and s.endswith("d"):
         days = int(s[1:-1])
         return (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        print(f"Invalid date: {s}. Use YYYY-MM-DD or +Nd")
+        return None
     return s
 
 def format_contact_line(c):
@@ -201,7 +255,7 @@ def cmd_list(args):
             by_stage[stage] = []
         by_stage[stage].append(c)
     
-    for stage in STAGES:
+    for stage in get_stages(data):
         if stage in by_stage:
             print(f"\n{stage.upper()} ({len(by_stage[stage])})")
             for c in sorted(by_stage[stage], key=lambda x: x.get("next_date") or "z"):
@@ -268,13 +322,14 @@ def cmd_stage(args):
     if not c:
         return
     
+    stages = get_stages(data)
     if not new_stage:
-        new_stage = pick_one(STAGES, prompt=f"New stage for {c['name']} (current: {c['stage']})")
+        new_stage = pick_one(stages, prompt=f"New stage for {c['name']} (current: {c['stage']})")
         if not new_stage:
             return
-    
-    if new_stage not in STAGES:
-        print(f"Invalid stage. Use: {', '.join(STAGES)}")
+
+    if new_stage not in stages:
+        print(f"Invalid stage. Use: {', '.join(stages)}")
         return
     
     old_stage = c["stage"]
@@ -312,8 +367,12 @@ def cmd_next(args):
     if not date:
         date = input("Due date (YYYY-MM-DD or +7d) [+7d]: ").strip() or "+7d"
     
+    parsed = parse_date(date, get_tz(data))
+    if parsed is None:
+        return
+
     c["next_action"] = action
-    c["next_date"] = parse_date(date, get_tz(data))
+    c["next_date"] = parsed
     
     save_data(data)
     print(f"{c['name']}: next → {c['next_action']} ({c['next_date']})")
@@ -351,18 +410,39 @@ def cmd_due(args):
     print()
 
 def cmd_add(args):
+    if not args:
+        print("Usage: crm add <contact|stage>")
+        return
+    if args[0] == "stage":
+        return cmd_add_stage(args[1:])
+    if args[0] != "contact":
+        print(f"Unknown: crm add {args[0]}. Use: crm add <contact|stage>")
+        return
+
     print("Add new contact:")
     name = input("  Name: ").strip()
     if not name:
         print("Cancelled.")
         return
     email = input("  Email: ").strip()
+    if email and "@" not in email:
+        print("  Invalid email.")
+        return
     phone = input("  Phone: ").strip()
     company = input("  Company: ").strip()
     role = input("  Role: ").strip()
     source = input("  Source (cold/referral/inbound): ").strip() or "cold"
     
     data = load_data()
+
+    dupes = [c for c in data["contacts"] if c["name"].lower() == name.lower()]
+    if dupes:
+        print(f"  Warning: '{dupes[0]['name']}' ({dupes[0].get('company', '')}) already exists.")
+        confirm = input("  Continue anyway? [y/N] ").strip().lower()
+        if confirm != 'y':
+            print("Cancelled.")
+            return
+
     stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
 
     contact = {
@@ -412,8 +492,17 @@ def cmd_edit(args):
         os.unlink(tmp_path)
 
 def cmd_rm(args):
+    if not args:
+        print("Usage: crm rm <contact|stage>")
+        return
+    if args[0] == "stage":
+        return cmd_rm_stage(args[1:])
+    if args[0] != "contact":
+        print(f"Unknown: crm rm {args[0]}. Use: crm rm <contact|stage>")
+        return
+
     data = load_data()
-    c = get_contact(data, args[0] if args else None, "Remove which contact?")
+    c = get_contact(data, args[1] if len(args) > 1 else None, "Remove which contact?")
     if not c:
         return
     
@@ -423,8 +512,6 @@ def cmd_rm(args):
         return
     
     data["contacts"].remove(c)
-    if "removed" not in data:
-        data["removed"] = []
     stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
     c["removed_at"] = stamp
     data["removed"].append(c)
@@ -473,27 +560,21 @@ def cmd_restore(args):
 def cmd_config(args):
     data = load_data()
 
+    cfg = data["config"]
+
     if not args:
-        # Show all config
-        has_config = False
-        for k, v in data.items():
-            if k == "contacts":
-                continue
-            print(f"  {k} = {v}")
-            has_config = True
-        if not has_config:
+        if not cfg:
             print("No config set.")
+            return
+        for k, v in cfg.items():
+            print(f"  {k} = {v}")
         return
 
     key = args[0]
-    if key == "contacts":
-        print("Use other commands to manage contacts.")
-        return
 
     if len(args) == 1:
-        # Get
-        if key in data:
-            print(f"  {key} = {data[key]}")
+        if key in cfg:
+            print(f"  {key} = {cfg[key]}")
         else:
             print(f"  {key} not set")
         return
@@ -508,14 +589,49 @@ def cmd_config(args):
             print(f"Invalid timezone: {value}. Use format like UTC+03:00")
             return
 
-    data[key] = value
+    cfg[key] = value
+    data["config"] = cfg
     save_data(data)
     print(f"  {key} = {value}")
 
 def cmd_stages(args):
+    data = load_data()
+    stages = get_stages(data)
     print("Stages:")
-    for s in STAGES:
+    for s in stages:
         print(f"  {s}")
+
+def cmd_add_stage(args):
+    if not args:
+        print("Usage: crm add stage <name>")
+        return
+    data = load_data()
+    stages = get_stages(data)
+    name = args[0].lower()
+    if name in stages:
+        print(f"Stage '{name}' already exists.")
+        return
+    stages.append(name)
+    save_data(data)
+    print(f"Added stage: {name}")
+
+def cmd_rm_stage(args):
+    if not args:
+        print("Usage: crm rm stage <name>")
+        return
+    data = load_data()
+    stages = get_stages(data)
+    name = args[0].lower()
+    if name not in stages:
+        print(f"Stage '{name}' not found.")
+        return
+    in_use = [c for c in data["contacts"] if c["stage"] == name]
+    if in_use:
+        print(f"Can't remove '{name}' — {len(in_use)} contact(s) in this stage.")
+        return
+    stages.remove(name)
+    save_data(data)
+    print(f"Removed stage: {name}")
 
 def cmd_search(args):
     if not args:

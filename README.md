@@ -31,11 +31,13 @@ crm note [QUERY] [TEXT]    Add a timestamped note
 crm stage [QUERY] [STAGE]  Move to new stage
 crm next [QUERY] [ACTION] [DATE]   Set next action
 crm edit [QUERY]           Open in $EDITOR
-crm add                    Add new contact
-crm rm [QUERY]             Remove contact (soft delete)
+crm add contact             Add new contact
+crm add stage [NAME]       Add a stage
+crm rm contact [QUERY]     Remove contact (soft delete)
+crm rm stage [NAME]        Remove a stage (if empty)
 crm restore [QUERY]        Restore a removed contact
 crm search TERM            Search across everything
-crm stages                 List valid stages
+crm stages                 List stages
 crm config [KEY] [VALUE]   Get/set config (e.g., timezone)
 ```
 
@@ -65,11 +67,31 @@ crm search pricing
 
 ## Stages
 
+Default stages:
+
 ```
 cold → contacted → responded → meeting → proposal → won
                                                   ↘ lost
                                                   ↘ dormant
 ```
+
+Stages are configurable:
+
+```bash
+crm stages              # list current stages
+crm add stage nurture   # add a stage
+crm rm stage dormant    # remove (only if no contacts in it)
+```
+
+## Configuration
+
+```bash
+crm config              # show all config
+crm config timezone     # get a value
+crm config timezone UTC+02:00   # set a value
+```
+
+Timezone is auto-detected on first run. Config is stored in `crm_data.json`.
 
 ## Data
 
