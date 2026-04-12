@@ -28,8 +28,10 @@ COMMANDS
   
   add                    Add new contact (interactive)
   
-  rm [QUERY]             Remove a contact
-  
+  rm [QUERY]             Remove a contact (soft delete)
+
+  restore [QUERY]        Restore a removed contact
+
   search TERM            Search across all contacts and notes
   
   stages                 Show valid stage names
@@ -421,8 +423,52 @@ def cmd_rm(args):
         return
     
     data["contacts"].remove(c)
+    if "removed" not in data:
+        data["removed"] = []
+    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+    c["removed_at"] = stamp
+    data["removed"].append(c)
     save_data(data)
     print(f"Removed {c['name']}")
+
+def cmd_restore(args):
+    data = load_data()
+    removed = data.get("removed", [])
+    if not removed:
+        print("No removed contacts.")
+        return
+
+    if args:
+        query = args[0].lower()
+        matches = [c for c in removed if query in c["name"].lower() or query in c["company"].lower()]
+    else:
+        matches = removed
+
+    if not matches:
+        print(f"No removed contacts matching '{args[0]}'")
+        return
+
+    def format_removed(c):
+        return f"{c['name']} ({c['company']}) [removed {c.get('removed_at', '?')}]"
+
+    if len(matches) == 1:
+        c = matches[0]
+    else:
+        c = pick_one(matches, prompt="Restore which contact?", format_fn=format_removed)
+
+    if not c:
+        return
+
+    dupes = [x for x in data["contacts"] if x["name"].lower() == c["name"].lower() and x["company"].lower() == c["company"].lower()]
+    if dupes:
+        print(f"{c['name']} ({c['company']}) already exists in contacts.")
+        return
+
+    data["removed"].remove(c)
+    del c["removed_at"]
+    data["contacts"].append(c)
+    save_data(data)
+    print(f"Restored {c['name']} ({c['company']})")
 
 def cmd_config(args):
     data = load_data()
@@ -533,6 +579,7 @@ def main():
         "edit": cmd_edit,
         "rm": cmd_rm,
         "remove": cmd_rm,
+        "restore": cmd_restore,
         "search": cmd_search,
         "find": cmd_search,
         "stages": cmd_stages,

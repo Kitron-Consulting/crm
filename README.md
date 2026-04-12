@@ -8,7 +8,7 @@ Your contacts live in a JSON file. You manage them from the terminal.
 
 ```bash
 # Clone and add to PATH
-git clone https://github.com/kitron-dev/crm.git
+git clone https://github.com/Kitron-Consulting/crm.git
 cd crm
 chmod +x crm
 
@@ -32,7 +32,8 @@ crm stage [QUERY] [STAGE]  Move to new stage
 crm next [QUERY] [ACTION] [DATE]   Set next action
 crm edit [QUERY]           Open in $EDITOR
 crm add                    Add new contact
-crm rm [QUERY]             Remove contact
+crm rm [QUERY]             Remove contact (soft delete)
+crm restore [QUERY]        Restore a removed contact
 crm search TERM            Search across everything
 crm stages                 List valid stages
 crm config [KEY] [VALUE]   Get/set config (e.g., timezone)
