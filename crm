@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""
+crm — lightweight CLI pipeline tracker
+
+USAGE
+  crm <command> [arguments]
+
+COMMANDS
+  list [STAGE]           List all contacts grouped by stage
+                         Optional: filter by stage (e.g., crm list meeting)
+
+  due [DAYS]             Show what needs action (default: next 7 days)
+  
+  show [QUERY]           Show contact details + full history
+                         Without QUERY: interactive picker
+  
+  note [QUERY] [TEXT]    Add a timestamped note
+                         Without args: interactive
+  
+  stage [QUERY] [STAGE]  Move contact to new stage
+                         Without args: interactive
+  
+  next [QUERY] [ACTION] [DATE]
+                         Set next action and due date
+                         DATE can be YYYY-MM-DD or relative like +7d
+  
+  edit [QUERY]           Open contact in $EDITOR (default: nano)
+  
+  add                    Add new contact (interactive)
+  
+  rm [QUERY]             Remove a contact
+  
+  search TERM            Search across all contacts and notes
+  
+  stages                 Show valid stage names
+
+EXAMPLES
+  crm due                What's due this week?
+  crm due 14             What's due in the next 2 weeks?
+  crm list               Show full pipeline
+  crm list meeting       Show only meetings
+  crm show               Pick contact interactively
+  crm show mekitec       Show Mekitec contact details
+  crm note               Pick contact, then type note
+  crm note mekitec "Called, no answer"
+  crm stage              Pick contact and stage interactively
+  crm stage mekitec responded
+  crm next mekitec "Send proposal" +3d
+  crm edit               Pick contact to edit
+
+STAGES
+  cold → contacted → responded → meeting → proposal → won
+                                                    ↘ lost
+                                                    ↘ dormant
+
+FILES
+  Data stored in crm_data.json (same folder as this script)
+"""
+
+import json
+import sys
+import os
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# Data file location — same directory as script
+DATA_FILE = Path(__file__).parent / "crm_data.json"
+
+STAGES = ["cold", "contacted", "responded", "meeting", "proposal", "won", "lost", "dormant"]
+STAGE_ORDER = {s: i for i, s in enumerate(STAGES)}
+
+def load_data():
+    if DATA_FILE.exists():
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"contacts": []}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def pick_one(items, prompt="Select", format_fn=None):
+    """Interactive picker. Returns selected item or None if cancelled."""
+    if not items:
+        print("No items to select from.")
+        return None
+    
+    if format_fn is None:
+        format_fn = str
+    
+    print(f"\n{prompt}:")
+    for i, item in enumerate(items, 1):
+        print(f"  {i}. {format_fn(item)}")
+    print(f"  0. Cancel")
+    
+    try:
+        choice = input("\n> ").strip()
+        if not choice or choice == "0":
+            return None
+        idx = int(choice) - 1
+        if 0 <= idx < len(items):
+            return items[idx]
+        print("Invalid selection.")
+        return None
+    except (ValueError, EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+def format_contact_option(c):
+    return f"{c['name']} ({c['company']}) [{c['stage'].upper()}]"
+
+def pick_contact_from_all(data, prompt="Select contact"):
+    """Pick any contact interactively."""
+    contacts = sorted(data["contacts"], key=lambda c: (STAGE_ORDER.get(c["stage"], 99), c["name"]))
+    return pick_one(contacts, prompt=prompt, format_fn=format_contact_option)
+
+def pick_contact_from_matches(matches):
+    """Pick from search results."""
+    if len(matches) == 1:
+        return matches[0]
+    return pick_one(matches, prompt="Multiple matches", format_fn=format_contact_option)
+
+def find_contact(data, query):
+    query = query.lower()
+    matches = []
+    for c in data["contacts"]:
+        if query in c["name"].lower() or query in c["company"].lower() or query in c["email"].lower():
+            matches.append(c)
+    return matches
+
+def get_contact(data, query=None, prompt="Select contact"):
+    """Get a contact - by query if provided, or interactive picker."""
+    if query:
+        matches = find_contact(data, query)
+        if not matches:
+            print(f"No contacts matching '{query}'")
+            return None
+        return pick_contact_from_matches(matches)
+    else:
+        return pick_contact_from_all(data, prompt)
+
+def parse_date(s):
+    if not s:
+        return ""
+    if s.startswith("+") and s.endswith("d"):
+        days = int(s[1:-1])
+        return (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+    return s
+
+def format_contact_line(c):
+    stage = c["stage"].upper()
+    due = c.get("next_date", "")
+    action = c.get("next_action", "")
+    due_str = f" → {due}: {action}" if due and action else ""
+    return f"  {c['name']} ({c['company']}) [{stage}]{due_str}"
+
+def cmd_list(args):
+    data = load_data()
+    filter_stage = args[0].lower() if args else None
+    
+    contacts = data["contacts"]
+    if filter_stage:
+        contacts = [c for c in contacts if c["stage"].lower() == filter_stage]
+    
+    by_stage = {}
+    for c in contacts:
+        stage = c["stage"]
+        if stage not in by_stage:
+            by_stage[stage] = []
+        by_stage[stage].append(c)
+    
+    for stage in STAGES:
+        if stage in by_stage:
+            print(f"\n{stage.upper()} ({len(by_stage[stage])})")
+            for c in sorted(by_stage[stage], key=lambda x: x.get("next_date") or "z"):
+                print(format_contact_line(c))
+    print()
+
+def cmd_show(args):
+    data = load_data()
+    c = get_contact(data, args[0] if args else None, "Show which contact?")
+    if not c:
+        return
+    
+    print(f"\n{'='*50}")
+    print(f"{c['name']} — {c['company']}")
+    print(f"{'='*50}")
+    print(f"Email:   {c['email']}")
+    print(f"Role:    {c.get('role', '')}")
+    print(f"Source:  {c.get('source', '')}")
+    print(f"Stage:   {c['stage'].upper()}")
+    print(f"Last:    {c.get('last_contact', '')}")
+    print(f"Next:    {c.get('next_date', '')} — {c.get('next_action', '')}")
+    print(f"\nNotes:")
+    for note in c.get("notes", []):
+        print(f"  [{note['date']}] {note['text']}")
+    print()
+
+def cmd_note(args):
+    data = load_data()
+    
+    if args:
+        c = get_contact(data, args[0], "Add note to which contact?")
+        note_text = " ".join(args[1:]) if len(args) > 1 else None
+    else:
+        c = get_contact(data, None, "Add note to which contact?")
+        note_text = None
+    
+    if not c:
+        return
+    
+    if not note_text:
+        note_text = input("Note: ").strip()
+        if not note_text:
+            print("Cancelled.")
+            return
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    if "notes" not in c:
+        c["notes"] = []
+    c["notes"].insert(0, {"date": today, "text": note_text})
+    c["last_contact"] = today
+    
+    save_data(data)
+    print(f"Added note to {c['name']}")
+
+def cmd_stage(args):
+    data = load_data()
+    
+    if args:
+        c = get_contact(data, args[0], "Change stage for which contact?")
+        new_stage = args[1].lower() if len(args) > 1 else None
+    else:
+        c = get_contact(data, None, "Change stage for which contact?")
+        new_stage = None
+    
+    if not c:
+        return
+    
+    if not new_stage:
+        new_stage = pick_one(STAGES, prompt=f"New stage for {c['name']} (current: {c['stage']})")
+        if not new_stage:
+            return
+    
+    if new_stage not in STAGES:
+        print(f"Invalid stage. Use: {', '.join(STAGES)}")
+        return
+    
+    old_stage = c["stage"]
+    c["stage"] = new_stage
+    
+    today = datetime.now().strftime("%Y-%m-%d")
+    if "notes" not in c:
+        c["notes"] = []
+    c["notes"].insert(0, {"date": today, "text": f"Stage: {old_stage} → {new_stage}"})
+    
+    save_data(data)
+    print(f"{c['name']}: {old_stage} → {new_stage}")
+
+def cmd_next(args):
+    data = load_data()
+    
+    if args:
+        c = get_contact(data, args[0], "Set next action for which contact?")
+        action = args[1] if len(args) > 1 else None
+        date = args[2] if len(args) > 2 else None
+    else:
+        c = get_contact(data, None, "Set next action for which contact?")
+        action = None
+        date = None
+    
+    if not c:
+        return
+    
+    if not action:
+        action = input("Next action: ").strip()
+        if not action:
+            print("Cancelled.")
+            return
+    
+    if not date:
+        date = input("Due date (YYYY-MM-DD or +7d) [+7d]: ").strip() or "+7d"
+    
+    c["next_action"] = action
+    c["next_date"] = parse_date(date)
+    
+    save_data(data)
+    print(f"{c['name']}: next → {c['next_action']} ({c['next_date']})")
+
+def cmd_due(args):
+    days = int(args[0]) if args else 7
+    cutoff = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    data = load_data()
+    due = []
+    overdue = []
+    
+    for c in data["contacts"]:
+        next_date = c.get("next_date", "")
+        if not next_date:
+            continue
+        if next_date < today:
+            overdue.append(c)
+        elif next_date <= cutoff:
+            due.append(c)
+    
+    if overdue:
+        print(f"\nOVERDUE ({len(overdue)})")
+        for c in sorted(overdue, key=lambda x: x["next_date"]):
+            print(format_contact_line(c))
+    
+    if due:
+        print(f"\nDUE WITHIN {days} DAYS ({len(due)})")
+        for c in sorted(due, key=lambda x: x["next_date"]):
+            print(format_contact_line(c))
+    
+    if not due and not overdue:
+        print(f"Nothing due within {days} days")
+    print()
+
+def cmd_add(args):
+    print("Add new contact:")
+    name = input("  Name: ").strip()
+    if not name:
+        print("Cancelled.")
+        return
+    email = input("  Email: ").strip()
+    company = input("  Company: ").strip()
+    role = input("  Role: ").strip()
+    source = input("  Source (cold/referral/inbound): ").strip() or "cold"
+    
+    data = load_data()
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    contact = {
+        "name": name,
+        "email": email,
+        "company": company,
+        "role": role,
+        "source": source,
+        "stage": "cold",
+        "last_contact": today,
+        "next_action": "",
+        "next_date": "",
+        "notes": [{"date": today, "text": "Added to CRM"}]
+    }
+    
+    data["contacts"].append(contact)
+    save_data(data)
+    print(f"Added {name}")
+
+def cmd_edit(args):
+    data = load_data()
+    c = get_contact(data, args[0] if args else None, "Edit which contact?")
+    if not c:
+        return
+    
+    idx = data["contacts"].index(c)
+    
+    import tempfile
+    import subprocess
+    
+    editor = os.environ.get("EDITOR", "nano")
+    
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(c, f, indent=2, ensure_ascii=False)
+        tmp_path = f.name
+    
+    try:
+        subprocess.run([editor, tmp_path])
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            updated = json.load(f)
+        data["contacts"][idx] = updated
+        save_data(data)
+        print(f"Updated {updated['name']}")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        os.unlink(tmp_path)
+
+def cmd_rm(args):
+    data = load_data()
+    c = get_contact(data, args[0] if args else None, "Remove which contact?")
+    if not c:
+        return
+    
+    confirm = input(f"Remove {c['name']} ({c['company']})? [y/N] ").strip().lower()
+    if confirm != 'y':
+        print("Cancelled.")
+        return
+    
+    data["contacts"].remove(c)
+    save_data(data)
+    print(f"Removed {c['name']}")
+
+def cmd_stages(args):
+    print("Stages:")
+    for s in STAGES:
+        print(f"  {s}")
+
+def cmd_search(args):
+    if not args:
+        term = input("Search: ").strip()
+        if not term:
+            print("Cancelled.")
+            return
+    else:
+        term = " ".join(args)
+    
+    term = term.lower()
+    data = load_data()
+    results = []
+    
+    for c in data["contacts"]:
+        matches = []
+        
+        # Search fields
+        for field in ["name", "company", "email", "role", "source", "next_action"]:
+            if term in c.get(field, "").lower():
+                matches.append(f"{field}: {c.get(field)}")
+        
+        # Search notes
+        for note in c.get("notes", []):
+            if term in note["text"].lower():
+                matches.append(f"[{note['date']}] {note['text'][:60]}...")
+        
+        if matches:
+            results.append((c, matches))
+    
+    if not results:
+        print(f"No results for '{term}'")
+        return
+    
+    print(f"\nFound {len(results)} contact(s):\n")
+    for c, matches in results:
+        print(f"{c['name']} ({c['company']}) [{c['stage'].upper()}]")
+        for m in matches[:3]:  # Show max 3 matches per contact
+            print(f"    → {m}")
+        if len(matches) > 3:
+            print(f"    → ...and {len(matches) - 3} more")
+        print()
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return
+    
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+    
+    commands = {
+        "list": cmd_list,
+        "ls": cmd_list,
+        "show": cmd_show,
+        "note": cmd_note,
+        "stage": cmd_stage,
+        "next": cmd_next,
+        "due": cmd_due,
+        "add": cmd_add,
+        "edit": cmd_edit,
+        "rm": cmd_rm,
+        "remove": cmd_rm,
+        "search": cmd_search,
+        "find": cmd_search,
+        "stages": cmd_stages,
+    }
+    
+    if cmd in commands:
+        commands[cmd](args)
+    else:
+        print(f"Unknown command: {cmd}")
+        print(__doc__)
+
+if __name__ == "__main__":
+    main()

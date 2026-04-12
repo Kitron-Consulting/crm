@@ -1,0 +1,9 @@
+# Data file — don't commit your contacts
+crm_data.json
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
