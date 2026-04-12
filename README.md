@@ -4,6 +4,10 @@ A lightweight CLI pipeline tracker for solo consultants and freelancers. No depe
 
 Your contacts live in a JSON file. You manage them from the terminal.
 
+![demo](demo.gif)
+
+![interactive demo](demo_interactive.gif)
+
 ## Install
 
 ```bash

@@ -1,6 +1,11 @@
 # Data file — don't commit your contacts
 crm_data.json
 
+# Demo recording source files
+demo.sh
+*.cast
+demo_runner.py
+
 # Python
 __pycache__/
 *.pyc
