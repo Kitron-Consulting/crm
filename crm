@@ -40,6 +40,8 @@ COMMANDS
 
   config [KEY] [VALUE]   Get/set config (e.g., timezone)
 
+  help [COMMAND]         Show help for a command
+
 EXAMPLES
   crm due                What's due this week?
   crm due 14             What's due in the next 2 weeks?
@@ -241,6 +243,9 @@ def format_contact_line(c):
     return f"  {c['name']} ({c['company']}) [{stage}]{due_str}"
 
 def cmd_list(args):
+    if len(args) > 1:
+        print("Usage: crm list [STAGE]")
+        return
     data = load_data()
     filter_stage = args[0].lower() if args else None
     
@@ -263,6 +268,9 @@ def cmd_list(args):
     print()
 
 def cmd_show(args):
+    if len(args) > 1:
+        print("Usage: crm show [QUERY]")
+        return
     data = load_data()
     c = get_contact(data, args[0] if args else None, "Show which contact?")
     if not c:
@@ -283,11 +291,15 @@ def cmd_show(args):
     print()
 
 def cmd_note(args):
+    if len(args) > 2:
+        print("Usage: crm note [QUERY] \"[TEXT]\"")
+        print("  Multi-word text must be quoted: crm note acme \"Called, no answer\"")
+        return
     data = load_data()
-    
+
     if args:
         c = get_contact(data, args[0], "Add note to which contact?")
-        note_text = " ".join(args[1:]) if len(args) > 1 else None
+        note_text = args[1] if len(args) > 1 else None
     else:
         c = get_contact(data, None, "Add note to which contact?")
         note_text = None
@@ -310,8 +322,11 @@ def cmd_note(args):
     print(f"Added note to {c['name']}")
 
 def cmd_stage(args):
+    if len(args) > 2:
+        print("Usage: crm stage [QUERY] [STAGE]")
+        return
     data = load_data()
-    
+
     if args:
         c = get_contact(data, args[0], "Change stage for which contact?")
         new_stage = args[1].lower() if len(args) > 1 else None
@@ -344,8 +359,12 @@ def cmd_stage(args):
     print(f"{c['name']}: {old_stage} → {new_stage}")
 
 def cmd_next(args):
+    if len(args) > 3:
+        print("Usage: crm next [QUERY] \"[ACTION]\" [DATE]")
+        print("  Multi-word actions must be quoted: crm next acme \"Send proposal\" +3d")
+        return
     data = load_data()
-    
+
     if args:
         c = get_contact(data, args[0], "Set next action for which contact?")
         action = args[1] if len(args) > 1 else None
@@ -378,6 +397,9 @@ def cmd_next(args):
     print(f"{c['name']}: next → {c['next_action']} ({c['next_date']})")
 
 def cmd_due(args):
+    if len(args) > 1:
+        print("Usage: crm due [DAYS]")
+        return
     data = load_data()
     tz = get_tz(data)
     days = int(args[0]) if args else 7
@@ -463,6 +485,9 @@ def cmd_add(args):
     print(f"Added {name}")
 
 def cmd_edit(args):
+    if len(args) > 1:
+        print("Usage: crm edit [QUERY]")
+        return
     data = load_data()
     c = get_contact(data, args[0] if args else None, "Edit which contact?")
     if not c:
@@ -519,6 +544,9 @@ def cmd_rm(args):
     print(f"Removed {c['name']}")
 
 def cmd_restore(args):
+    if len(args) > 1:
+        print("Usage: crm restore [QUERY]")
+        return
     data = load_data()
     removed = data.get("removed", [])
     if not removed:
@@ -675,14 +703,40 @@ def cmd_search(args):
             print(f"    → ...and {len(matches) - 3} more")
         print()
 
+HELP = {
+    "list":    "crm list [STAGE]\n  List contacts grouped by stage. Optionally filter by stage name.",
+    "due":     "crm due [DAYS]\n  Show overdue and upcoming actions. Default: 7 days.",
+    "show":    "crm show [QUERY]\n  Show contact details and note history. Interactive picker if no query.",
+    "note":    "crm note [QUERY] [TEXT]\n  Add a timestamped note to a contact. Interactive if args omitted.",
+    "stage":   "crm stage [QUERY] [STAGE]\n  Move a contact to a new pipeline stage. Interactive if args omitted.",
+    "next":    "crm next [QUERY] [ACTION] [DATE]\n  Set next action and due date. DATE: YYYY-MM-DD or +Nd (e.g. +7d).",
+    "edit":    "crm edit [QUERY]\n  Open a contact in $EDITOR (default: nano).",
+    "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.",
+    "rm":      "crm rm contact [QUERY]\n  Soft-delete a contact.\n\ncrm rm stage <name>\n  Remove a stage (must have no contacts in it).",
+    "restore": "crm restore [QUERY]\n  Restore a previously removed contact.",
+    "search":  "crm search <TERM>\n  Search across all contact fields and notes.",
+    "stages":  "crm stages\n  List all pipeline stages.",
+    "config":  "crm config\n  Show all config.\n\ncrm config <key>\n  Get a config value.\n\ncrm config <key> <value>\n  Set a config value.\n\n  Available keys: timezone (e.g. UTC+03:00)",
+}
+
+def cmd_help(args):
+    if not args:
+        print(__doc__)
+        return
+    topic = args[0]
+    if topic in HELP:
+        print(f"\n{HELP[topic]}\n")
+    else:
+        print(f"No help for '{topic}'")
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return
-    
+
     cmd = sys.argv[1]
     args = sys.argv[2:]
-    
+
     commands = {
         "list": cmd_list,
         "ls": cmd_list,
@@ -701,8 +755,9 @@ def main():
         "stages": cmd_stages,
         "config": cmd_config,
         "cfg": cmd_config,
+        "help": cmd_help,
     }
-    
+
     if cmd in commands:
         commands[cmd](args)
     else:

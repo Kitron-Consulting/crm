@@ -39,6 +39,7 @@ crm restore [QUERY]        Restore a removed contact
 crm search TERM            Search across everything
 crm stages                 List stages
 crm config [KEY] [VALUE]   Get/set config (e.g., timezone)
+crm help [COMMAND]         Show help for a command
 ```
 
 All commands work interactively — if you skip arguments, you get a picker.
