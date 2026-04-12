@@ -240,7 +240,9 @@ def format_contact_line(c):
     due = c.get("next_date", "")
     action = c.get("next_action", "")
     due_str = f" → {due}: {action}" if due and action else ""
-    return f"  {c['name']} ({c['company']}) [{stage}]{due_str}"
+    role = c.get('role', '')
+    role_str = f" — {role}" if role else ""
+    return f"  {c['name']} ({c['company']}{role_str}) [{stage}]{due_str}"
 
 def cmd_list(args):
     if len(args) > 1:
