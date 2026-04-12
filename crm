@@ -58,10 +58,8 @@ EXAMPLES
   crm next mekitec "Send proposal" +3d
   crm edit               Pick contact to edit
 
-STAGES
-  cold → contacted → responded → meeting → proposal → won
-                                                    ↘ lost
-                                                    ↘ dormant
+STAGES (default, configurable)
+  cold · contacted · responded · meeting · proposal · won · lost · dormant
 
 FILES
   Data stored in crm_data.json (same folder as this script)
@@ -699,6 +697,18 @@ def cmd_list(args):
     stages = get_stages(data)
     tz = get_tz(data)
     today = datetime.now(tz).strftime("%Y-%m-%d")
+
+    # Pipeline summary
+    total = len(contacts)
+    if total:
+        parts = []
+        for stage in stages:
+            count = len(by_stage.get(stage, []))
+            if count:
+                sc = stage_color(stage, stages)
+                parts.append(f"{sc}{stage} {BOLD}{count}{RESET}")
+        print(f"\n{DIM}Pipeline:{RESET} {f' {DIM}·{RESET} '.join(parts)} {DIM}({total} total){RESET}")
+
     for stage in stages:
         if stage in by_stage:
             sc = stage_color(stage, stages)
@@ -753,12 +763,16 @@ def cmd_note(args):
     
     if not c:
         return
-    
+
     if not note_text:
-        note_text = prompt_input("Note", required=True)
-        if not note_text:
+        result = form_edit([
+            {"name": "Note", "value": "", "required": True},
+        ], title=f"Add note to {c['name']}")
+        if not result:
+            print(f"  {DIM}Cancelled.{RESET}")
             return
-    
+        note_text = result["Note"]
+
     stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
     if "notes" not in c:
         c["notes"] = []
@@ -823,14 +837,26 @@ def cmd_next(args):
     if not c:
         return
     
-    if not action:
-        action = prompt_input("Next action", required=True)
-        if not action:
-            return
+    if not action or not date:
+        def validate_date(v):
+            if v.startswith("+") and v.endswith("d"):
+                return None
+            try:
+                datetime.strptime(v, "%Y-%m-%d")
+            except ValueError:
+                return "Use YYYY-MM-DD or +Nd"
+            return None
 
-    if not date:
-        date = prompt_input("Due date (YYYY-MM-DD or +Nd)", default="+7d")
-    
+        result = form_edit([
+            {"name": "Action", "value": action or "", "required": True},
+            {"name": "Due date", "value": date or "+7d", "required": True, "validate": validate_date},
+        ], title=f"Next action for {c['name']}")
+        if not result:
+            print(f"  {DIM}Cancelled.{RESET}")
+            return
+        action = result["Action"]
+        date = result["Due date"]
+
     parsed = parse_date(date, get_tz(data))
     if parsed is None:
         return

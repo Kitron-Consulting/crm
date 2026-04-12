@@ -73,10 +73,10 @@ crm search pricing
 Default stages:
 
 ```
-cold → contacted → responded → meeting → proposal → won
-                                                  ↘ lost
-                                                  ↘ dormant
+cold · contacted · responded · meeting · proposal · won · lost · dormant
 ```
+
+Contacts can move between any stages freely.
 
 Stages are configurable:
 
