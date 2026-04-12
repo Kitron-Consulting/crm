@@ -35,6 +35,7 @@ crm add                    Add new contact
 crm rm [QUERY]             Remove contact
 crm search TERM            Search across everything
 crm stages                 List valid stages
+crm config [KEY] [VALUE]   Get/set config (e.g., timezone)
 ```
 
 All commands work interactively — if you skip arguments, you get a picker.
