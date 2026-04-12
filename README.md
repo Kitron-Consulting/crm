@@ -30,11 +30,11 @@ crm show [QUERY]           Contact details + history
 crm note [QUERY] [TEXT]    Add a timestamped note
 crm stage [QUERY] [STAGE]  Move to new stage
 crm next [QUERY] [ACTION] [DATE]   Set next action
-crm edit [QUERY]           Edit contact (interactive form)
-crm add contact            Add new contact (interactive form)
+crm edit [QUERY] [--field value ...]   Edit contact
+crm add contact [--name X ...]         Add new contact
 crm add stage [NAME]       Add a stage
 crm add source [NAME]      Add a source
-crm rm contact [QUERY]     Remove contact (soft delete)
+crm rm contact [QUERY] [-y]  Remove contact (soft delete)
 crm rm stage [NAME]        Remove a stage (if empty)
 crm rm source [NAME]       Remove a source (if unused)
 crm restore [QUERY]        Restore a removed contact
@@ -115,6 +115,25 @@ cp crm_data.json ~/backup/
 
 # Sync across machines
 # Just sync the JSON file
+```
+
+## Scripting
+
+All commands work non-interactively when given full arguments:
+
+```bash
+# Add a contact without the form
+crm add contact --name "John Doe" --email "john@co.com" --company "Co" --stage contacted
+
+# Edit specific fields
+crm edit acme --stage meeting --role "CTO"
+
+# Remove without confirmation
+crm rm contact acme -y
+
+# Pipe-friendly — colors and interactive pickers are disabled when not a terminal
+crm due 14 | grep overdue
+crm list > pipeline.txt
 ```
 
 ## Why this exists

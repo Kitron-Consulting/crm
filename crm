@@ -24,13 +24,15 @@ COMMANDS
                          Set next action and due date
                          DATE can be YYYY-MM-DD or relative like +7d
   
-  edit [QUERY]           Edit contact (interactive form)
-  
-  add contact             Add new contact (interactive)
+  edit [QUERY] [--field value ...]
+                         Edit contact (interactive form, or set fields directly)
+
+  add contact [--name X --email X ...]
+                         Add new contact (interactive form, or pass flags)
   add stage [NAME]       Add a stage
   add source [NAME]      Add a source
 
-  rm contact [QUERY]     Remove a contact (soft delete)
+  rm contact [QUERY] [-y]  Remove a contact (soft delete, -y to skip confirm)
   rm stage [NAME]        Remove a stage (if empty)
   rm source [NAME]       Remove a source (if unused)
 
@@ -57,6 +59,9 @@ EXAMPLES
   crm stage mekitec responded
   crm next mekitec "Send proposal" +3d
   crm edit               Pick contact to edit
+  crm add contact --name "John" --email "j@co.com" --company "Co"
+  crm edit acme --stage meeting --role "CTO"
+  crm rm contact acme -y
 
 STAGES (default, configurable)
   cold · contacted · responded · meeting · proposal · won · lost · dormant
@@ -233,13 +238,69 @@ def prompt_confirm(message, default=False):
 import curses
 os.environ.setdefault("ESCDELAY", "25")
 
+ANSI_RE = re.compile(r'\033\[([0-9;]*)m')
+
+CURSES_COLOR_MAP = {}  # initialized in curses functions
+
+def _init_curses_colors():
+    curses.use_default_colors()
+    pairs = [
+        (1, curses.COLOR_GREEN),
+        (2, curses.COLOR_RED),
+        (3, curses.COLOR_CYAN),
+        (4, curses.COLOR_YELLOW),
+        (5, curses.COLOR_BLUE),
+        (6, curses.COLOR_MAGENTA),
+    ]
+    for pair_id, color in pairs:
+        curses.init_pair(pair_id, color, -1)
+    CURSES_COLOR_MAP.update({
+        31: curses.color_pair(2),  # red
+        32: curses.color_pair(1),  # green
+        33: curses.color_pair(4),  # yellow
+        34: curses.color_pair(5),  # blue
+        35: curses.color_pair(6),  # magenta
+        36: curses.color_pair(3),  # cyan
+    })
+
+def _addstr_ansi(stdscr, row, col, text, max_w, extra_attr=0):
+    """Render ANSI-colored text using curses attributes."""
+    pos = col
+    attr = extra_attr
+    for part in ANSI_RE.split(text):
+        if not part:
+            continue
+        # Check if this is an ANSI code parameter
+        if part.isdigit() or (';' in part and all(p.isdigit() for p in part.split(';'))):
+            codes = [int(c) for c in part.split(';') if c]
+            for code in codes:
+                if code == 0:
+                    attr = extra_attr
+                elif code == 1:
+                    attr |= curses.A_BOLD
+                elif code == 2:
+                    attr |= curses.A_DIM
+                elif code in CURSES_COLOR_MAP:
+                    # Clear previous color, add new
+                    for cv in CURSES_COLOR_MAP.values():
+                        attr &= ~cv
+                    attr |= CURSES_COLOR_MAP[code]
+        else:
+            # Regular text
+            remaining = max_w - (pos - col)
+            if remaining <= 0:
+                break
+            text_part = part[:remaining]
+            try:
+                stdscr.addstr(row, pos, text_part, attr)
+            except curses.error:
+                pass
+            pos += len(text_part)
+
 def _curses_pick_one(stdscr, items, prompt, format_fn, filter_fn):
     """Picker implementation using curses."""
     curses.curs_set(0)
-    curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_GREEN, -1)
-    curses.init_pair(2, curses.COLOR_RED, -1)
-    curses.init_pair(3, curses.COLOR_CYAN, -1)
+    _init_curses_colors()
 
     cursor = 0
     query = ""
@@ -296,12 +357,15 @@ def _curses_pick_one(stdscr, items, prompt, format_fn, filter_fn):
                 stdscr.addnstr(row, 4, f"↑ {start} more", w - 5, curses.A_DIM)
                 row += 1
             for i in range(start, end):
-                label = strip_ansi(format_fn(filtered[i]))
+                label = format_fn(filtered[i])
                 if i == cursor:
-                    stdscr.addnstr(row, 2, "▸ ", w - 3, curses.color_pair(1))
-                    stdscr.addnstr(row, 4, label[:w - 5], w - 5, curses.A_BOLD)
+                    try:
+                        stdscr.addstr(row, 2, "▸ ", curses.color_pair(1))
+                    except curses.error:
+                        pass
+                    _addstr_ansi(stdscr, row, 4, label, w - 5, curses.A_BOLD)
                 else:
-                    stdscr.addnstr(row, 4, label[:w - 5], w - 5)
+                    _addstr_ansi(stdscr, row, 4, label, w - 5)
                 row += 1
             if end < total:
                 stdscr.addnstr(row, 4, f"↓ {total - end} more", w - 5, curses.A_DIM)
@@ -337,10 +401,7 @@ def _curses_pick_one(stdscr, items, prompt, format_fn, filter_fn):
 def _curses_form_edit(stdscr, fields, title, pick_fn):
     """Form implementation using curses."""
     curses.curs_set(1)
-    curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_GREEN, -1)
-    curses.init_pair(2, curses.COLOR_RED, -1)
-    curses.init_pair(3, curses.COLOR_CYAN, -1)
+    _init_curses_colors()
 
     active = 0
     cursor_pos = [len(f.get("value", "")) for f in fields]
@@ -659,6 +720,28 @@ def parse_date(s, tz=None):
         return None
     return s
 
+def relative_date(date_str, today_str):
+    """Format a date relative to today."""
+    if not date_str or not today_str:
+        return date_str
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        t = datetime.strptime(today_str, "%Y-%m-%d")
+    except ValueError:
+        return date_str
+    diff = (d - t).days
+    if diff < -1:
+        return f"{abs(diff)}d overdue"
+    if diff == -1:
+        return "yesterday"
+    if diff == 0:
+        return "today"
+    if diff == 1:
+        return "tomorrow"
+    if diff <= 14:
+        return f"in {diff}d"
+    return date_str
+
 def format_contact_line(c, stages=None, today=None):
     s = c["stage"]
     sc = stage_color(s, stages or [])
@@ -666,10 +749,11 @@ def format_contact_line(c, stages=None, today=None):
     action = c.get("next_action", "")
     if due and action:
         overdue = today and due < today
+        rel = relative_date(due, today)
         if overdue:
-            due_str = f" {DIM}→{RESET} {RED}{BOLD}{due}{RESET}{DIM}:{RESET} {RED}{action}{RESET}"
+            due_str = f" {DIM}→{RESET} {RED}{BOLD}{rel}{RESET}{DIM}:{RESET} {RED}{action}{RESET}"
         else:
-            due_str = f" {DIM}→{RESET} {GREEN}{due}{RESET}{DIM}:{RESET} {action}"
+            due_str = f" {DIM}→{RESET} {GREEN}{rel}{RESET}{DIM}:{RESET} {action}"
     else:
         due_str = ""
     role = c.get('role', '')
@@ -736,10 +820,15 @@ def cmd_show(args):
     print(f"  {DIM}Role:{RESET}    {c.get('role', '')}")
     print(f"  {DIM}Source:{RESET}  {c.get('source', '')}")
     print(f"  {DIM}Stage:{RESET}   {sc}{BOLD}{c['stage'].upper()}{RESET}")
+    tz = get_tz(data)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
     next_date = c.get('next_date', '')
     next_action = c.get('next_action', '')
     if next_date and next_action:
-        print(f"  {DIM}Next:{RESET}    {GREEN}{next_date}{RESET} {DIM}—{RESET} {next_action}")
+        rel = relative_date(next_date, today)
+        overdue = next_date < today
+        dc = RED if overdue else GREEN
+        print(f"  {DIM}Next:{RESET}    {dc}{rel}{RESET} {DIM}—{RESET} {next_action}")
     else:
         print(f"  {DIM}Next:{RESET}    {DIM}none{RESET}")
     print(f"\n  {BOLD}Notes:{RESET}")
@@ -900,8 +989,41 @@ def cmd_due(args):
             print(format_contact_line(c, stages, today))
     
     if not due and not overdue:
-        print(f"Nothing due within {days} days")
-    print()
+        print(f"\n{GREEN}Nothing due within {days} days.{RESET}")
+        print()
+        return
+
+    # Non-interactive: just print the list
+    if not sys.stdin.isatty():
+        print()
+        return
+
+    # Interactive: picker with action flow
+    all_due = sorted(overdue, key=lambda x: x["next_date"]) + sorted(due, key=lambda x: x["next_date"])
+    def fmt(c):
+        rel = relative_date(c.get("next_date", ""), today)
+        act = c.get("next_action", "")
+        base = format_contact_option(c, stages)
+        return f"{base} {DIM}→{RESET} {rel}: {act}"
+    c = pick_one(all_due, prompt=f"Due / overdue ({len(all_due)}) — select to take action", format_fn=fmt, filter_fn=_contact_filter)
+    if not c:
+        return
+
+    actions = ["note", "stage", "next", "show", "edit"]
+    action = pick_one(actions, prompt=f"Action for {c['name']}")
+    if not action:
+        return
+
+    if action == "note":
+        cmd_note([c["name"]])
+    elif action == "stage":
+        cmd_stage([c["name"]])
+    elif action == "next":
+        cmd_next([c["name"]])
+    elif action == "show":
+        cmd_show([c["name"]])
+    elif action == "edit":
+        cmd_edit([c["name"]])
 
 def cmd_add(args):
     if not args:
@@ -915,6 +1037,17 @@ def cmd_add(args):
         print(f"Unknown: crm add {args[0]}. Use: crm add <contact|stage|source>")
         return
 
+    # Parse --flags for non-interactive use
+    rest = args[1:]
+    flags = {}
+    i = 0
+    while i < len(rest):
+        if rest[i].startswith("--") and i + 1 < len(rest):
+            flags[rest[i][2:].lower()] = rest[i + 1]
+            i += 2
+        else:
+            i += 1
+
     data = load_data()
     stages = get_stages(data)
     sources = get_sources(data)
@@ -924,20 +1057,44 @@ def cmd_add(args):
             return "Must contain @"
         return None
 
-    form_fields = [
-        {"name": "Name", "value": "", "required": True},
-        {"name": "Email", "value": "", "validate": validate_email},
-        {"name": "Phone", "value": ""},
-        {"name": "Company", "value": ""},
-        {"name": "Role", "value": ""},
-        {"name": "Source", "value": "cold", "options": sources},
-        {"name": "Stage", "value": "cold", "options": stages},
-    ]
-
-    result = form_edit(form_fields, title="Add new contact")
-    if not result:
-        print(f"  {DIM}Cancelled.{RESET}")
-        return
+    if "name" in flags:
+        # Non-interactive mode
+        email = flags.get("email", "")
+        if validate_email(email):
+            print(f"{RED}Invalid email: {email}{RESET}")
+            return
+        source = flags.get("source", "cold")
+        if source not in sources:
+            print(f"{RED}Invalid source: {source}. Use: {', '.join(sources)}{RESET}")
+            return
+        stage = flags.get("stage", "cold")
+        if stage not in stages:
+            print(f"{RED}Invalid stage: {stage}. Use: {', '.join(stages)}{RESET}")
+            return
+        result = {
+            "Name": flags["name"],
+            "Email": email,
+            "Phone": flags.get("phone", ""),
+            "Company": flags.get("company", ""),
+            "Role": flags.get("role", ""),
+            "Source": source,
+            "Stage": stage,
+        }
+    else:
+        # Interactive form
+        form_fields = [
+            {"name": "Name", "value": "", "required": True},
+            {"name": "Email", "value": "", "validate": validate_email},
+            {"name": "Phone", "value": ""},
+            {"name": "Company", "value": ""},
+            {"name": "Role", "value": ""},
+            {"name": "Source", "value": "cold", "options": sources},
+            {"name": "Stage", "value": "cold", "options": stages},
+        ]
+        result = form_edit(form_fields, title="Add new contact")
+        if not result:
+            print(f"  {DIM}Cancelled.{RESET}")
+            return
 
     # Check for duplicates
     dupes = [c for c in data["contacts"] if c["name"].lower() == result["Name"].lower()]
@@ -967,11 +1124,22 @@ def cmd_add(args):
     print(f"{GREEN}Added {BOLD}{contact['name']}{RESET}")
 
 def cmd_edit(args):
-    if len(args) > 1:
-        print("Usage: crm edit [QUERY]")
-        return
+    # Parse query and --flags
+    query = None
+    flags = {}
+    i = 0
+    while i < len(args):
+        if args[i].startswith("--") and i + 1 < len(args):
+            flags[args[i][2:].lower()] = args[i + 1]
+            i += 2
+        elif query is None:
+            query = args[i]
+            i += 1
+        else:
+            i += 1
+
     data = load_data()
-    c = get_contact(data, args[0] if args else None, "Edit which contact?")
+    c = get_contact(data, query, "Edit which contact?")
     if not c:
         return
 
@@ -983,28 +1151,46 @@ def cmd_edit(args):
             return "Must contain @"
         return None
 
-    form_fields = [
-        {"name": "Name", "value": c.get("name", ""), "required": True},
-        {"name": "Email", "value": c.get("email", ""), "validate": validate_email},
-        {"name": "Phone", "value": c.get("phone", "")},
-        {"name": "Company", "value": c.get("company", "")},
-        {"name": "Role", "value": c.get("role", "")},
-        {"name": "Source", "value": c.get("source", "cold"), "options": sources},
-        {"name": "Stage", "value": c.get("stage", "cold"), "options": stages},
-    ]
-
-    result = form_edit(form_fields, title=f"Edit {c['name']}")
-    if not result:
-        print(f"  {DIM}Cancelled.{RESET}")
-        return
-
-    c["name"] = result["Name"]
-    c["email"] = result["Email"]
-    c["phone"] = result["Phone"]
-    c["company"] = result["Company"]
-    c["role"] = result["Role"]
-    c["source"] = result["Source"]
-    c["stage"] = result["Stage"]
+    if flags:
+        # Non-interactive mode — apply flags directly
+        field_map = {"name": "name", "email": "email", "phone": "phone",
+                     "company": "company", "role": "role", "source": "source", "stage": "stage"}
+        for key, val in flags.items():
+            if key not in field_map:
+                print(f"{RED}Unknown field: {key}{RESET}")
+                return
+            if key == "email" and validate_email(val):
+                print(f"{RED}Invalid email: {val}{RESET}")
+                return
+            if key == "source" and val not in sources:
+                print(f"{RED}Invalid source: {val}. Use: {', '.join(sources)}{RESET}")
+                return
+            if key == "stage" and val not in stages:
+                print(f"{RED}Invalid stage: {val}. Use: {', '.join(stages)}{RESET}")
+                return
+            c[field_map[key]] = val
+    else:
+        # Interactive form
+        form_fields = [
+            {"name": "Name", "value": c.get("name", ""), "required": True},
+            {"name": "Email", "value": c.get("email", ""), "validate": validate_email},
+            {"name": "Phone", "value": c.get("phone", "")},
+            {"name": "Company", "value": c.get("company", "")},
+            {"name": "Role", "value": c.get("role", "")},
+            {"name": "Source", "value": c.get("source", "cold"), "options": sources},
+            {"name": "Stage", "value": c.get("stage", "cold"), "options": stages},
+        ]
+        result = form_edit(form_fields, title=f"Edit {c['name']}")
+        if not result:
+            print(f"  {DIM}Cancelled.{RESET}")
+            return
+        c["name"] = result["Name"]
+        c["email"] = result["Email"]
+        c["phone"] = result["Phone"]
+        c["company"] = result["Company"]
+        c["role"] = result["Role"]
+        c["source"] = result["Source"]
+        c["stage"] = result["Stage"]
 
     save_data(data)
     print(f"{GREEN}Updated {BOLD}{c['name']}{RESET}")
@@ -1021,12 +1207,17 @@ def cmd_rm(args):
         print(f"Unknown: crm rm {args[0]}. Use: crm rm <contact|stage|source>")
         return
 
+    rest = args[1:]
+    force = "-y" in rest
+    if force:
+        rest = [a for a in rest if a != "-y"]
+
     data = load_data()
-    c = get_contact(data, args[1] if len(args) > 1 else None, "Remove which contact?")
+    c = get_contact(data, rest[0] if rest else None, "Remove which contact?")
     if not c:
         return
-    
-    if not prompt_confirm(f"Remove {BOLD}{c['name']}{RESET} ({c['company']})?"):
+
+    if not force and not prompt_confirm(f"Remove {BOLD}{c['name']}{RESET} ({c['company']})?"):
         print(f"  {DIM}Cancelled.{RESET}")
         return
     
@@ -1237,9 +1428,9 @@ HELP = {
     "note":    "crm note [QUERY] [TEXT]\n  Add a timestamped note to a contact. Interactive if args omitted.",
     "stage":   "crm stage [QUERY] [STAGE]\n  Move a contact to a new pipeline stage. Interactive if args omitted.",
     "next":    "crm next [QUERY] [ACTION] [DATE]\n  Set next action and due date. DATE: YYYY-MM-DD or +Nd (e.g. +7d).",
-    "edit":    "crm edit [QUERY]\n  Edit a contact using an interactive form.",
-    "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.\n\ncrm add source <name>\n  Add a new contact source.",
-    "rm":      "crm rm contact [QUERY]\n  Soft-delete a contact.\n\ncrm rm stage <name>\n  Remove a stage (must have no contacts in it).\n\ncrm rm source <name>\n  Remove a source (must have no contacts using it).",
+    "edit":    "crm edit [QUERY]\n  Edit a contact using an interactive form.\n\ncrm edit <QUERY> --field value [--field value ...]\n  Edit specific fields non-interactively.\n  Fields: name, email, phone, company, role, source, stage",
+    "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add contact --name X [--email X] [--phone X] [--company X] [--role X] [--source X] [--stage X]\n  Add a contact non-interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.\n\ncrm add source <name>\n  Add a new contact source.",
+    "rm":      "crm rm contact [QUERY] [-y]\n  Soft-delete a contact. Use -y to skip confirmation.\n\ncrm rm stage <name>\n  Remove a stage (must have no contacts in it).\n\ncrm rm source <name>\n  Remove a source (must have no contacts using it).",
     "restore": "crm restore [QUERY]\n  Restore a previously removed contact.",
     "search":  "crm search <TERM>\n  Search across all contact fields and notes.",
     "stages":  "crm stages\n  List all pipeline stages.",
@@ -1256,9 +1447,80 @@ def cmd_help(args):
     else:
         print(f"No help for '{topic}'")
 
+def cmd_dashboard(args):
+    data = load_data()
+    stages = get_stages(data)
+    tz = get_tz(data)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    contacts = data["contacts"]
+
+    if not contacts:
+        print(f"\n{DIM}No contacts yet. Run {RESET}{BOLD}crm add contact{RESET}{DIM} to get started.{RESET}\n")
+        return
+
+    # Pipeline summary
+    by_stage = {}
+    for c in contacts:
+        s = c["stage"]
+        if s not in by_stage:
+            by_stage[s] = []
+        by_stage[s].append(c)
+
+    parts = []
+    for stage in stages:
+        count = len(by_stage.get(stage, []))
+        if count:
+            sc = stage_color(stage, stages)
+            parts.append(f"{sc}{stage} {BOLD}{count}{RESET}")
+    print(f"\n{BOLD}Pipeline{RESET} {DIM}({len(contacts)} contacts){RESET}")
+    print(f"  {f' {DIM}·{RESET} '.join(parts)}")
+
+    # Overdue
+    overdue = [c for c in contacts if c.get("next_date") and c["next_date"] < today]
+    if overdue:
+        print(f"\n{RED}{BOLD}Overdue ({len(overdue)}){RESET}")
+        for c in sorted(overdue, key=lambda x: x["next_date"])[:5]:
+            days_over = (datetime.strptime(today, "%Y-%m-%d") - datetime.strptime(c["next_date"], "%Y-%m-%d")).days
+            print(f"  {BOLD}{c['name']}{RESET} {DIM}({c['company']}){RESET} — {RED}{days_over}d overdue{RESET}: {c.get('next_action', '')}")
+        if len(overdue) > 5:
+            print(f"  {DIM}...and {len(overdue) - 5} more{RESET}")
+
+    # Due this week
+    week = (datetime.now(tz) + timedelta(days=7)).strftime("%Y-%m-%d")
+    due_soon = [c for c in contacts if c.get("next_date") and today <= c["next_date"] <= week]
+    if due_soon:
+        print(f"\n{YELLOW}{BOLD}Due this week ({len(due_soon)}){RESET}")
+        for c in sorted(due_soon, key=lambda x: x["next_date"])[:5]:
+            days_until = (datetime.strptime(c["next_date"], "%Y-%m-%d") - datetime.strptime(today, "%Y-%m-%d")).days
+            if days_until == 0:
+                when = f"{YELLOW}today{RESET}"
+            elif days_until == 1:
+                when = f"{YELLOW}tomorrow{RESET}"
+            else:
+                when = f"in {days_until}d"
+            print(f"  {BOLD}{c['name']}{RESET} {DIM}({c['company']}){RESET} — {when}: {c.get('next_action', '')}")
+        if len(due_soon) > 5:
+            print(f"  {DIM}...and {len(due_soon) - 5} more{RESET}")
+
+    # No actions set
+    no_action = [c for c in contacts if not c.get("next_date") and c["stage"] not in ("won", "lost", "dormant")]
+    if no_action:
+        print(f"\n{DIM}No next action ({len(no_action)}){RESET}")
+        for c in no_action[:3]:
+            sc = stage_color(c["stage"], stages)
+            print(f"  {BOLD}{c['name']}{RESET} {DIM}({c['company']}){RESET} {sc}[{c['stage'].upper()}]{RESET}")
+        if len(no_action) > 3:
+            print(f"  {DIM}...and {len(no_action) - 3} more{RESET}")
+
+    if not overdue and not due_soon:
+        print(f"\n{GREEN}Nothing due this week.{RESET}")
+
+    print(f"\n{DIM}Run {RESET}crm help{DIM} for commands.{RESET}")
+    print()
+
 def main():
     if len(sys.argv) < 2:
-        print(__doc__)
+        cmd_dashboard([])
         return
 
     cmd = sys.argv[1]
@@ -1287,6 +1549,17 @@ def main():
 
     if cmd in commands:
         commands[cmd](args)
+        # Show overdue warning (skip for commands that already show it)
+        if cmd not in ("due", "help", "stages", "config", "cfg"):
+            try:
+                data = load_data()
+                tz = get_tz(data)
+                today = datetime.now(tz).strftime("%Y-%m-%d")
+                n = sum(1 for c in data["contacts"] if c.get("next_date") and c["next_date"] < today)
+                if n:
+                    print(f"{RED}! {n} overdue contact{'s' if n != 1 else ''}. Run {RESET}crm due{RED} to review.{RESET}")
+            except Exception:
+                pass
     else:
         print(f"Unknown command: {cmd}")
         print(__doc__)
