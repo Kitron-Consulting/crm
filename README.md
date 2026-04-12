@@ -107,11 +107,13 @@ Timezone is auto-detected on first run. Config is stored in `crm_data.json`.
 
 ## Data
 
-Everything lives in `crm_data.json` next to the script. Back it up however you like — it's just a file.
+Everything lives in `crm_data.json` next to the script. Override the path with `CRM_DATA`:
 
 ```bash
+export CRM_DATA=~/crm_data.json
+
 # Backup
-cp crm_data.json ~/backup/
+cp "$CRM_DATA" ~/backup/
 
 # Sync across machines
 # Just sync the JSON file
@@ -134,6 +136,11 @@ crm rm contact acme -y
 # Pipe-friendly — colors and interactive pickers are disabled when not a terminal
 crm due 14 | grep overdue
 crm list > pipeline.txt
+
+# Use a different data file (--data flag or CRM_DATA env var)
+crm --data clients.json list
+crm --data leads.json due
+CRM_DATA=~/leads.json crm due
 ```
 
 ## Why this exists
