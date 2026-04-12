@@ -30,11 +30,13 @@ crm show [QUERY]           Contact details + history
 crm note [QUERY] [TEXT]    Add a timestamped note
 crm stage [QUERY] [STAGE]  Move to new stage
 crm next [QUERY] [ACTION] [DATE]   Set next action
-crm edit [QUERY]           Open in $EDITOR
-crm add contact             Add new contact
+crm edit [QUERY]           Edit contact (interactive form)
+crm add contact            Add new contact (interactive form)
 crm add stage [NAME]       Add a stage
+crm add source [NAME]      Add a source
 crm rm contact [QUERY]     Remove contact (soft delete)
 crm rm stage [NAME]        Remove a stage (if empty)
+crm rm source [NAME]       Remove a source (if unused)
 crm restore [QUERY]        Restore a removed contact
 crm search TERM            Search across everything
 crm stages                 List stages
@@ -82,6 +84,15 @@ Stages are configurable:
 crm stages              # list current stages
 crm add stage nurture   # add a stage
 crm rm stage dormant    # remove (only if no contacts in it)
+```
+
+## Sources
+
+Default sources: `cold`, `referral`, `inbound`. Configurable:
+
+```bash
+crm add source website   # add a source
+crm rm source inbound    # remove (only if no contacts use it)
 ```
 
 ## Configuration

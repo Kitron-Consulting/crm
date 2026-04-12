@@ -24,13 +24,15 @@ COMMANDS
                          Set next action and due date
                          DATE can be YYYY-MM-DD or relative like +7d
   
-  edit [QUERY]           Open contact in $EDITOR (default: nano)
+  edit [QUERY]           Edit contact (interactive form)
   
   add contact             Add new contact (interactive)
   add stage [NAME]       Add a stage
+  add source [NAME]      Add a source
 
   rm contact [QUERY]     Remove a contact (soft delete)
   rm stage [NAME]        Remove a stage (if empty)
+  rm source [NAME]       Remove a source (if unused)
 
   restore [QUERY]        Restore a removed contact
 
@@ -69,6 +71,7 @@ import json
 import sys
 import os
 import re
+import readline  # enables line editing (arrow keys, history) in input()
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -102,7 +105,8 @@ def stage_color(stage, stages):
 DATA_FILE = Path(__file__).parent / "crm_data.json"
 
 DEFAULT_STAGES = ["cold", "contacted", "responded", "meeting", "proposal", "won", "lost", "dormant"]
-CURRENT_VERSION = 2
+DEFAULT_SOURCES = ["cold", "referral", "inbound"]
+CURRENT_VERSION = 3
 
 # --- Migrations ---
 # Key = target version. Only add an entry when the schema actually changes.
@@ -127,13 +131,22 @@ def migrate_to_2(data):
     if "stages" not in data["config"]:
         data["config"]["stages"] = DEFAULT_STAGES[:]
 
+def migrate_to_3(data):
+    """Add sources to config."""
+    if "sources" not in data["config"]:
+        data["config"]["sources"] = DEFAULT_SOURCES[:]
+
 MIGRATIONS = {
     1: migrate_to_1,
     2: migrate_to_2,
+    3: migrate_to_3,
 }
 
 def get_stages(data):
     return data["config"]["stages"]
+
+def get_sources(data):
+    return data["config"]["sources"]
 
 def load_data():
     if DATA_FILE.exists():
@@ -143,6 +156,10 @@ def load_data():
         data = {"contacts": []}
 
     version = data.get("version", 0)
+    if version > CURRENT_VERSION:
+        print(f"{RED}Warning: data file is version {version}, but this crm is version {CURRENT_VERSION}.{RESET}")
+        print(f"{RED}Update your crm or you may lose data.{RESET}")
+        sys.exit(1)
     if version < CURRENT_VERSION:
         while version < CURRENT_VERSION:
             version += 1
@@ -184,20 +201,389 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-def pick_one(items, prompt="Select", format_fn=None):
-    """Interactive picker. Returns selected item or None if cancelled."""
+def prompt_input(label, default="", required=False):
+    """Styled input prompt with optional default."""
+    if default:
+        display = f"  {BOLD}{label}{RESET} {DIM}[{default}]{RESET}: "
+    else:
+        req = f" {RED}*{RESET}" if required else ""
+        display = f"  {BOLD}{label}{RESET}{req}: "
+    try:
+        value = input(display).strip()
+        if not value and default:
+            return default
+        if not value and required:
+            print(f"  {RED}Required.{RESET}")
+            return None
+        return value
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+def prompt_confirm(message, default=False):
+    """Styled y/N confirmation prompt."""
+    hint = f"{BOLD}y{RESET}/{DIM}N{RESET}" if not default else f"{DIM}y{RESET}/{BOLD}N{RESET}"
+    try:
+        answer = input(f"  {message} [{hint}] ").strip().lower()
+        if not answer:
+            return default
+        return answer == "y"
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+import curses
+os.environ.setdefault("ESCDELAY", "25")
+
+def _curses_pick_one(stdscr, items, prompt, format_fn, filter_fn):
+    """Picker implementation using curses."""
+    curses.curs_set(0)
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_GREEN, -1)
+    curses.init_pair(2, curses.COLOR_RED, -1)
+    curses.init_pair(3, curses.COLOR_CYAN, -1)
+
+    cursor = 0
+    query = ""
+    filtered = list(items)
+
+    # Strip ANSI codes for display in curses
+    ansi_re = re.compile(r'\033\[[0-9;]*m')
+    def strip_ansi(s):
+        return ansi_re.sub('', s)
+
+    def do_filter():
+        nonlocal filtered, cursor
+        if not query:
+            filtered = list(items)
+        elif filter_fn:
+            filtered = [item for item in items if filter_fn(item, query)]
+        else:
+            q = query.lower()
+            filtered = [item for item in items if q in strip_ansi(format_fn(item)).lower()]
+        cursor = min(cursor, max(0, len(filtered) - 1))
+
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        stdscr.addnstr(0, 0, f"{prompt}:", w - 1, curses.A_BOLD)
+
+        if query:
+            stdscr.addnstr(1, 2, f"Filter: {query}", w - 3)
+        else:
+            stdscr.addnstr(1, 2, "Type to filter...", w - 3, curses.A_DIM)
+
+        max_visible = h - 5
+        total = len(filtered)
+
+        if total <= max_visible:
+            start, end = 0, total
+        else:
+            half = max_visible // 2
+            if cursor < half:
+                start = 0
+            elif cursor >= total - half:
+                start = total - max_visible
+            else:
+                start = cursor - half
+            end = start + max_visible
+
+        row = 3
+        if not filtered:
+            stdscr.addnstr(row, 2, "No matches", w - 3, curses.A_DIM)
+            row += 1
+        else:
+            if start > 0:
+                stdscr.addnstr(row, 4, f"↑ {start} more", w - 5, curses.A_DIM)
+                row += 1
+            for i in range(start, end):
+                label = strip_ansi(format_fn(filtered[i]))
+                if i == cursor:
+                    stdscr.addnstr(row, 2, "▸ ", w - 3, curses.color_pair(1))
+                    stdscr.addnstr(row, 4, label[:w - 5], w - 5, curses.A_BOLD)
+                else:
+                    stdscr.addnstr(row, 4, label[:w - 5], w - 5)
+                row += 1
+            if end < total:
+                stdscr.addnstr(row, 4, f"↓ {total - end} more", w - 5, curses.A_DIM)
+                row += 1
+
+        footer = "↑↓ navigate · enter select · esc cancel"
+        stdscr.addnstr(h - 1, 2, footer, w - 3, curses.A_DIM)
+
+        stdscr.refresh()
+
+        key = stdscr.get_wch()
+
+        if key == "\x1b" or key == "\x03":  # Esc or Ctrl-C
+            return None
+        elif key == "\n" or key == "\r" or key == curses.KEY_ENTER:
+            if filtered:
+                return filtered[cursor]
+            return None
+        elif key == curses.KEY_UP:
+            if filtered:
+                cursor = (cursor - 1) % len(filtered)
+        elif key == curses.KEY_DOWN:
+            if filtered:
+                cursor = (cursor + 1) % len(filtered)
+        elif key in ("\x7f", "\x08", curses.KEY_BACKSPACE):
+            if query:
+                query = query[:-1]
+                do_filter()
+        elif isinstance(key, str) and key.isprintable():
+            query += key
+            do_filter()
+
+def _curses_form_edit(stdscr, fields, title, pick_fn):
+    """Form implementation using curses."""
+    curses.curs_set(1)
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_GREEN, -1)
+    curses.init_pair(2, curses.COLOR_RED, -1)
+    curses.init_pair(3, curses.COLOR_CYAN, -1)
+
+    active = 0
+    cursor_pos = [len(f.get("value", "")) for f in fields]
+    values = [f.get("value", "") for f in fields]
+    errors = ["" for _ in fields]
+    on_save = False
+
+    def validate_field(i):
+        f = fields[i]
+        v = values[i]
+        if f.get("required") and not v:
+            errors[i] = "Required"
+            return
+        vfn = f.get("validate")
+        if vfn and v:
+            err = vfn(v)
+            errors[i] = err or ""
+        else:
+            errors[i] = ""
+
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        row = 0
+
+        if title:
+            stdscr.addnstr(row, 0, title, w - 1, curses.A_BOLD)
+            row += 2
+
+        for i, f in enumerate(fields):
+            name = f["name"]
+            v = values[i]
+            err = errors[i]
+            is_active = (i == active and not on_save)
+
+            if is_active:
+                stdscr.addnstr(row, 2, "▸ ", w - 3, curses.color_pair(1))
+                stdscr.addnstr(row, 4, f"{name}: ", w - 5, curses.A_BOLD)
+                field_col = 4 + len(name) + 2
+                stdscr.addnstr(row, field_col, v[:w - field_col - 1], w - field_col - 1)
+                # Position cursor
+                curses.curs_set(1)
+                stdscr.move(row, field_col + cursor_pos[i])
+            else:
+                stdscr.addnstr(row, 4, f"{name}:", w - 5, curses.A_DIM)
+                val_col = 4 + len(name) + 2
+                if f.get("options") and v:
+                    stdscr.addnstr(row, val_col, v[:w - val_col - 1], w - val_col - 1, curses.color_pair(3))
+                elif v:
+                    stdscr.addnstr(row, val_col, v[:w - val_col - 1], w - val_col - 1)
+                else:
+                    stdscr.addnstr(row, val_col, "—", w - val_col - 1, curses.A_DIM)
+
+            if err:
+                err_col = 4 + len(name) + 2 + len(v) + 1
+                if err_col < w - len(err) - 3:
+                    stdscr.addnstr(row, err_col, f"← {err}", w - err_col - 1, curses.color_pair(2))
+            elif is_active and f.get("required") and not v:
+                hint_col = 4 + len(name) + 2 + len(v) + 1
+                if hint_col < w - 12:
+                    stdscr.addnstr(row, hint_col, "(required)", w - hint_col - 1, curses.A_DIM)
+            elif is_active and f.get("options"):
+                hint_col = 4 + len(name) + 2 + len(v) + 1
+                if hint_col < w - 15:
+                    stdscr.addnstr(row, hint_col, "(tab to pick)", w - hint_col - 1, curses.A_DIM)
+
+            row += 1
+
+        row += 1
+        if on_save:
+            curses.curs_set(0)
+            stdscr.addnstr(row, 2, "▸ [ Save ]", w - 3, curses.color_pair(1) | curses.A_BOLD)
+        else:
+            stdscr.addnstr(row, 4, "[ Save ]", w - 5, curses.A_DIM)
+
+        footer = "↑↓ navigate · tab pick option · enter save · esc cancel"
+        stdscr.addnstr(h - 1, 2, footer, w - 3, curses.A_DIM)
+
+        stdscr.refresh()
+
+        key = stdscr.get_wch()
+
+        if key == "\x1b" or key == "\x03":
+            return None
+
+        elif key == "\n" or key == "\r" or key == curses.KEY_ENTER:
+            if on_save:
+                has_error = False
+                for i in range(len(fields)):
+                    validate_field(i)
+                    if errors[i]:
+                        has_error = True
+                if has_error:
+                    on_save = False
+                    for i in range(len(fields)):
+                        if errors[i]:
+                            active = i
+                            break
+                    continue
+                return {f["name"]: values[i] for i, f in enumerate(fields)}
+            else:
+                validate_field(active)
+                if active < len(fields) - 1:
+                    active += 1
+                    cursor_pos[active] = len(values[active])
+                else:
+                    on_save = True
+
+        elif key == curses.KEY_UP:
+            if on_save:
+                on_save = False
+                active = len(fields) - 1
+                cursor_pos[active] = len(values[active])
+            elif active > 0:
+                validate_field(active)
+                active -= 1
+                cursor_pos[active] = len(values[active])
+
+        elif key == curses.KEY_DOWN:
+            if not on_save:
+                validate_field(active)
+                if active < len(fields) - 1:
+                    active += 1
+                    cursor_pos[active] = len(values[active])
+                else:
+                    on_save = True
+
+        elif key == "\t":
+            if not on_save and fields[active].get("options"):
+                picked = pick_fn(fields[active]["options"], f"Select {fields[active]['name']}")
+                if picked:
+                    values[active] = picked
+                    cursor_pos[active] = len(picked)
+
+        elif key == curses.KEY_LEFT:
+            if not on_save and cursor_pos[active] > 0:
+                cursor_pos[active] -= 1
+
+        elif key == curses.KEY_RIGHT:
+            if not on_save and cursor_pos[active] < len(values[active]):
+                cursor_pos[active] += 1
+
+        elif key == curses.KEY_HOME or key == "\x01":
+            if not on_save:
+                cursor_pos[active] = 0
+
+        elif key == curses.KEY_END or key == "\x05":
+            if not on_save:
+                cursor_pos[active] = len(values[active])
+
+        elif key in ("\x7f", "\x08", curses.KEY_BACKSPACE):
+            if not on_save and not fields[active].get("options") and cursor_pos[active] > 0:
+                v = values[active]
+                p = cursor_pos[active]
+                values[active] = v[:p-1] + v[p:]
+                cursor_pos[active] -= 1
+                errors[active] = ""
+
+        elif isinstance(key, str) and key.isprintable() and not on_save and not fields[active].get("options"):
+            v = values[active]
+            p = cursor_pos[active]
+            values[active] = v[:p] + key + v[p:]
+            cursor_pos[active] += 1
+            errors[active] = ""
+
+def form_edit(fields, title=""):
+    """Interactive form editor using curses.
+
+    fields: list of dicts with keys:
+        name: field label
+        value: current value (string)
+        required: bool (optional)
+        options: list of strings for picker fields (optional)
+        validate: fn(value) -> error string or None (optional)
+
+    Returns dict of {name: value} or None if cancelled.
+    """
+    if not sys.stdin.isatty():
+        return _form_edit_simple(fields, title)
+
+    result = [None]
+
+    def run(stdscr):
+        def pick_fn(options, prompt):
+            return _curses_pick_one(stdscr, options, prompt, str, None)
+        result[0] = _curses_form_edit(stdscr, fields, title, pick_fn)
+
+    try:
+        curses.wrapper(run)
+    except KeyboardInterrupt:
+        pass
+    return result[0]
+
+def _form_edit_simple(fields, title=""):
+    """Fallback form for non-interactive terminals."""
+    if title:
+        print(f"\n{title}")
+    result = {}
+    for f in fields:
+        v = prompt_input(f["name"], default=f.get("value", ""), required=f.get("required", False))
+        if v is None:
+            return None
+        vfn = f.get("validate")
+        if vfn and v:
+            err = vfn(v)
+            if err:
+                print(f"  {RED}{err}{RESET}")
+                return None
+        result[f["name"]] = v
+    return result
+
+def pick_one(items, prompt="Select", format_fn=None, filter_fn=None):
+    """Interactive picker with arrow keys and type-to-filter."""
     if not items:
         print("No items to select from.")
         return None
-    
+
     if format_fn is None:
         format_fn = str
-    
-    print(f"\n{BOLD}{prompt}:{RESET}")
+
+    if not sys.stdin.isatty():
+        return _pick_one_simple(items, prompt, format_fn)
+
+    result = [None]
+
+    def run(stdscr):
+        result[0] = _curses_pick_one(stdscr, items, prompt, format_fn, filter_fn)
+
+    try:
+        curses.wrapper(run)
+    except KeyboardInterrupt:
+        pass
+    return result[0]
+
+def _pick_one_simple(items, prompt, format_fn):
+    """Fallback picker for non-interactive terminals."""
+    ansi_re = re.compile(r'\033\[[0-9;]*m')
+    print(f"\n{prompt}:")
     for i, item in enumerate(items, 1):
-        print(f"  {DIM}{i}.{RESET} {format_fn(item)}")
-    print(f"  {DIM}0. Cancel{RESET}")
-    
+        print(f"  {i}. {format_fn(item)}")
+    print(f"  0. Cancel")
     try:
         choice = input("\n> ").strip()
         if not choice or choice == "0":
@@ -218,13 +604,22 @@ def format_contact_option(c, stages=None):
     sc = stage_color(s, stages or [])
     return f"{BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{role_str}{DIM}){RESET} {sc}[{s.upper()}]{RESET}"
 
+def _contact_filter(c, query):
+    q = query.lower()
+    return (q in c.get("name", "").lower()
+            or q in c.get("company", "").lower()
+            or q in c.get("role", "").lower()
+            or q in c.get("email", "").lower()
+            or q in c.get("stage", "").lower()
+            or q in c.get("source", "").lower())
+
 def pick_contact_from_all(data, prompt="Select contact"):
     """Pick any contact interactively."""
     stages = get_stages(data)
     order = {s: i for i, s in enumerate(stages)}
     contacts = sorted(data["contacts"], key=lambda c: (order.get(c["stage"], 99), c["name"]))
     fmt = lambda c: format_contact_option(c, stages)
-    return pick_one(contacts, prompt=prompt, format_fn=fmt)
+    return pick_one(contacts, prompt=prompt, format_fn=fmt, filter_fn=_contact_filter)
 
 def pick_contact_from_matches(data, matches):
     """Pick from search results."""
@@ -232,7 +627,7 @@ def pick_contact_from_matches(data, matches):
         return matches[0]
     stages = get_stages(data)
     fmt = lambda c: format_contact_option(c, stages)
-    return pick_one(matches, prompt="Multiple matches", format_fn=fmt)
+    return pick_one(matches, prompt="Multiple matches", format_fn=fmt, filter_fn=_contact_filter)
 
 def find_contact(data, query):
     query = query.lower()
@@ -360,9 +755,8 @@ def cmd_note(args):
         return
     
     if not note_text:
-        note_text = input("Note: ").strip()
+        note_text = prompt_input("Note", required=True)
         if not note_text:
-            print("Cancelled.")
             return
     
     stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
@@ -430,13 +824,12 @@ def cmd_next(args):
         return
     
     if not action:
-        action = input("Next action: ").strip()
+        action = prompt_input("Next action", required=True)
         if not action:
-            print("Cancelled.")
             return
-    
+
     if not date:
-        date = input("Due date (YYYY-MM-DD or +7d) [+7d]: ").strip() or "+7d"
+        date = prompt_input("Due date (YYYY-MM-DD or +Nd)", default="+7d")
     
     parsed = parse_date(date, get_tz(data))
     if parsed is None:
@@ -486,56 +879,66 @@ def cmd_due(args):
 
 def cmd_add(args):
     if not args:
-        print("Usage: crm add <contact|stage>")
+        print("Usage: crm add <contact|stage|source>")
         return
     if args[0] == "stage":
         return cmd_add_stage(args[1:])
+    if args[0] == "source":
+        return cmd_add_source(args[1:])
     if args[0] != "contact":
-        print(f"Unknown: crm add {args[0]}. Use: crm add <contact|stage>")
+        print(f"Unknown: crm add {args[0]}. Use: crm add <contact|stage|source>")
         return
 
-    print("Add new contact:")
-    name = input("  Name: ").strip()
-    if not name:
-        print("Cancelled.")
-        return
-    email = input("  Email: ").strip()
-    if email and "@" not in email:
-        print("  Invalid email.")
-        return
-    phone = input("  Phone: ").strip()
-    company = input("  Company: ").strip()
-    role = input("  Role: ").strip()
-    source = input("  Source (cold/referral/inbound): ").strip() or "cold"
-    
     data = load_data()
+    stages = get_stages(data)
+    sources = get_sources(data)
 
-    dupes = [c for c in data["contacts"] if c["name"].lower() == name.lower()]
+    def validate_email(v):
+        if v and "@" not in v:
+            return "Must contain @"
+        return None
+
+    form_fields = [
+        {"name": "Name", "value": "", "required": True},
+        {"name": "Email", "value": "", "validate": validate_email},
+        {"name": "Phone", "value": ""},
+        {"name": "Company", "value": ""},
+        {"name": "Role", "value": ""},
+        {"name": "Source", "value": "cold", "options": sources},
+        {"name": "Stage", "value": "cold", "options": stages},
+    ]
+
+    result = form_edit(form_fields, title="Add new contact")
+    if not result:
+        print(f"  {DIM}Cancelled.{RESET}")
+        return
+
+    # Check for duplicates
+    dupes = [c for c in data["contacts"] if c["name"].lower() == result["Name"].lower()]
     if dupes:
-        print(f"  Warning: '{dupes[0]['name']}' ({dupes[0].get('company', '')}) already exists.")
-        confirm = input("  Continue anyway? [y/N] ").strip().lower()
-        if confirm != 'y':
-            print("Cancelled.")
+        print(f"  {YELLOW}Warning: '{dupes[0]['name']}' ({dupes[0].get('company', '')}) already exists.{RESET}")
+        if not prompt_confirm("Continue anyway?"):
+            print(f"  {DIM}Cancelled.{RESET}")
             return
 
     stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
 
     contact = {
-        "name": name,
-        "email": email,
-        "phone": phone,
-        "company": company,
-        "role": role,
-        "source": source,
-        "stage": "cold",
+        "name": result["Name"],
+        "email": result["Email"],
+        "phone": result["Phone"],
+        "company": result["Company"],
+        "role": result["Role"],
+        "source": result["Source"],
+        "stage": result["Stage"],
         "next_action": "",
         "next_date": "",
         "notes": [{"date": stamp, "text": "Added to CRM"}]
     }
-    
+
     data["contacts"].append(contact)
     save_data(data)
-    print(f"{GREEN}Added {BOLD}{name}{RESET}")
+    print(f"{GREEN}Added {BOLD}{contact['name']}{RESET}")
 
 def cmd_edit(args):
     if len(args) > 1:
@@ -545,38 +948,51 @@ def cmd_edit(args):
     c = get_contact(data, args[0] if args else None, "Edit which contact?")
     if not c:
         return
-    
-    idx = data["contacts"].index(c)
-    
-    import tempfile
-    import subprocess
-    
-    editor = os.environ.get("EDITOR", "nano")
-    
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
-        json.dump(c, f, indent=2, ensure_ascii=False)
-        tmp_path = f.name
-    
-    try:
-        subprocess.run([editor, tmp_path])
-        with open(tmp_path, "r", encoding="utf-8") as f:
-            updated = json.load(f)
-        data["contacts"][idx] = updated
-        save_data(data)
-        print(f"{GREEN}Updated {BOLD}{updated['name']}{RESET}")
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        os.unlink(tmp_path)
+
+    stages = get_stages(data)
+    sources = get_sources(data)
+
+    def validate_email(v):
+        if v and "@" not in v:
+            return "Must contain @"
+        return None
+
+    form_fields = [
+        {"name": "Name", "value": c.get("name", ""), "required": True},
+        {"name": "Email", "value": c.get("email", ""), "validate": validate_email},
+        {"name": "Phone", "value": c.get("phone", "")},
+        {"name": "Company", "value": c.get("company", "")},
+        {"name": "Role", "value": c.get("role", "")},
+        {"name": "Source", "value": c.get("source", "cold"), "options": sources},
+        {"name": "Stage", "value": c.get("stage", "cold"), "options": stages},
+    ]
+
+    result = form_edit(form_fields, title=f"Edit {c['name']}")
+    if not result:
+        print(f"  {DIM}Cancelled.{RESET}")
+        return
+
+    c["name"] = result["Name"]
+    c["email"] = result["Email"]
+    c["phone"] = result["Phone"]
+    c["company"] = result["Company"]
+    c["role"] = result["Role"]
+    c["source"] = result["Source"]
+    c["stage"] = result["Stage"]
+
+    save_data(data)
+    print(f"{GREEN}Updated {BOLD}{c['name']}{RESET}")
 
 def cmd_rm(args):
     if not args:
-        print("Usage: crm rm <contact|stage>")
+        print("Usage: crm rm <contact|stage|source>")
         return
     if args[0] == "stage":
         return cmd_rm_stage(args[1:])
+    if args[0] == "source":
+        return cmd_rm_source(args[1:])
     if args[0] != "contact":
-        print(f"Unknown: crm rm {args[0]}. Use: crm rm <contact|stage>")
+        print(f"Unknown: crm rm {args[0]}. Use: crm rm <contact|stage|source>")
         return
 
     data = load_data()
@@ -584,9 +1000,8 @@ def cmd_rm(args):
     if not c:
         return
     
-    confirm = input(f"Remove {c['name']} ({c['company']})? [y/N] ").strip().lower()
-    if confirm != 'y':
-        print("Cancelled.")
+    if not prompt_confirm(f"Remove {BOLD}{c['name']}{RESET} ({c['company']})?"):
+        print(f"  {DIM}Cancelled.{RESET}")
         return
     
     data["contacts"].remove(c)
@@ -714,11 +1129,42 @@ def cmd_rm_stage(args):
     save_data(data)
     print(f"{YELLOW}Removed stage: {BOLD}{name}{RESET}")
 
+def cmd_add_source(args):
+    if not args:
+        print("Usage: crm add source <name>")
+        return
+    data = load_data()
+    sources = get_sources(data)
+    name = args[0].lower()
+    if name in sources:
+        print(f"Source '{name}' already exists.")
+        return
+    sources.append(name)
+    save_data(data)
+    print(f"{GREEN}Added source: {BOLD}{name}{RESET}")
+
+def cmd_rm_source(args):
+    if not args:
+        print("Usage: crm rm source <name>")
+        return
+    data = load_data()
+    sources = get_sources(data)
+    name = args[0].lower()
+    if name not in sources:
+        print(f"Source '{name}' not found.")
+        return
+    in_use = [c for c in data["contacts"] if c.get("source") == name]
+    if in_use:
+        print(f"Can't remove '{name}' — {len(in_use)} contact(s) with this source.")
+        return
+    sources.remove(name)
+    save_data(data)
+    print(f"{YELLOW}Removed source: {BOLD}{name}{RESET}")
+
 def cmd_search(args):
     if not args:
-        term = input("Search: ").strip()
+        term = prompt_input("Search", required=True)
         if not term:
-            print("Cancelled.")
             return
     else:
         term = " ".join(args)
@@ -765,9 +1211,9 @@ HELP = {
     "note":    "crm note [QUERY] [TEXT]\n  Add a timestamped note to a contact. Interactive if args omitted.",
     "stage":   "crm stage [QUERY] [STAGE]\n  Move a contact to a new pipeline stage. Interactive if args omitted.",
     "next":    "crm next [QUERY] [ACTION] [DATE]\n  Set next action and due date. DATE: YYYY-MM-DD or +Nd (e.g. +7d).",
-    "edit":    "crm edit [QUERY]\n  Open a contact in $EDITOR (default: nano).",
-    "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.",
-    "rm":      "crm rm contact [QUERY]\n  Soft-delete a contact.\n\ncrm rm stage <name>\n  Remove a stage (must have no contacts in it).",
+    "edit":    "crm edit [QUERY]\n  Edit a contact using an interactive form.",
+    "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.\n\ncrm add source <name>\n  Add a new contact source.",
+    "rm":      "crm rm contact [QUERY]\n  Soft-delete a contact.\n\ncrm rm stage <name>\n  Remove a stage (must have no contacts in it).\n\ncrm rm source <name>\n  Remove a source (must have no contacts using it).",
     "restore": "crm restore [QUERY]\n  Restore a previously removed contact.",
     "search":  "crm search <TERM>\n  Search across all contact fields and notes.",
     "stages":  "crm stages\n  List all pipeline stages.",
