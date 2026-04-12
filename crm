@@ -154,8 +154,15 @@ def get_sources(data):
 
 def load_data():
     if DATA_FILE.exists():
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {"contacts": []}
+        except (json.JSONDecodeError, ValueError):
+            print(f"{RED}Error: {DATA_FILE} is corrupt or unreadable.{RESET}")
+            print(f"{RED}Fix the file manually or remove it to start fresh.{RESET}")
+            sys.exit(1)
     else:
         data = {"contacts": []}
 
@@ -712,7 +719,11 @@ def parse_date(s, tz=None):
     if not s:
         return ""
     if s.startswith("+") and s.endswith("d"):
-        days = int(s[1:-1])
+        try:
+            days = int(s[1:-1])
+        except ValueError:
+            print(f"Invalid date: {s}. Use YYYY-MM-DD or +Nd")
+            return None
         return (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
     try:
         datetime.strptime(s, "%Y-%m-%d")
