@@ -446,47 +446,77 @@ def _curses_form_edit(stdscr, fields, title, pick_fn):
             is_active = (i == active and not on_save)
 
             if is_active:
+                active_row = row
                 stdscr.addnstr(row, 2, "▸ ", w - 3, curses.color_pair(1))
                 stdscr.addnstr(row, 4, f"{name}: ", w - 5, curses.A_BOLD)
                 field_col = 4 + len(name) + 2
-                stdscr.addnstr(row, field_col, v[:w - field_col - 1], w - field_col - 1)
-                # Position cursor
-                curses.curs_set(1)
-                stdscr.move(row, field_col + cursor_pos[i])
+                avail = w - field_col - 1
+                cp = cursor_pos[i]
+                # Horizontal scroll: show a window of text around cursor
+                if avail > 0:
+                    if cp < avail:
+                        scroll = 0
+                    else:
+                        scroll = cp - avail + 1
+                    visible = v[scroll:scroll + avail]
+                    stdscr.addnstr(row, field_col, visible, avail)
+                    cursor_screen_col = field_col + cp - scroll
+                else:
+                    cursor_screen_col = field_col
             else:
                 stdscr.addnstr(row, 4, f"{name}:", w - 5, curses.A_DIM)
                 val_col = 4 + len(name) + 2
-                if f.get("options") and v:
-                    stdscr.addnstr(row, val_col, v[:w - val_col - 1], w - val_col - 1, curses.color_pair(3))
-                elif v:
-                    stdscr.addnstr(row, val_col, v[:w - val_col - 1], w - val_col - 1)
-                else:
-                    stdscr.addnstr(row, val_col, "—", w - val_col - 1, curses.A_DIM)
+                avail = w - val_col - 1
+                if avail > 0:
+                    if f.get("options") and v:
+                        stdscr.addnstr(row, val_col, v[:avail], avail, curses.color_pair(3))
+                    elif v:
+                        stdscr.addnstr(row, val_col, v[:avail], avail)
+                    else:
+                        stdscr.addnstr(row, val_col, "—", avail, curses.A_DIM)
 
             if err:
-                err_col = 4 + len(name) + 2 + len(v) + 1
-                if err_col < w - len(err) - 3:
-                    stdscr.addnstr(row, err_col, f"← {err}", w - err_col - 1, curses.color_pair(2))
+                err_col = min(4 + len(name) + 2 + len(v) + 1, w - len(err) - 4)
+                if 0 < err_col < w - 3:
+                    try:
+                        stdscr.addnstr(row, err_col, f"← {err}", w - err_col - 1, curses.color_pair(2))
+                    except curses.error:
+                        pass
             elif is_active and f.get("required") and not v:
-                hint_col = 4 + len(name) + 2 + len(v) + 1
+                hint_col = 4 + len(name) + 2 + 1
                 if hint_col < w - 12:
-                    stdscr.addnstr(row, hint_col, "(required)", w - hint_col - 1, curses.A_DIM)
+                    try:
+                        stdscr.addnstr(row, hint_col, "(required)", w - hint_col - 1, curses.A_DIM)
+                    except curses.error:
+                        pass
             elif is_active and f.get("options"):
-                hint_col = 4 + len(name) + 2 + len(v) + 1
-                if hint_col < w - 15:
-                    stdscr.addnstr(row, hint_col, "(tab to pick)", w - hint_col - 1, curses.A_DIM)
+                hint_col = min(4 + len(name) + 2 + len(v) + 1, w - 15)
+                if 0 < hint_col < w - 3:
+                    try:
+                        stdscr.addnstr(row, hint_col, "(tab to pick)", w - hint_col - 1, curses.A_DIM)
+                    except curses.error:
+                        pass
 
             row += 1
 
         row += 1
         if on_save:
-            curses.curs_set(0)
             stdscr.addnstr(row, 2, "▸ [ Save ]", w - 3, curses.color_pair(1) | curses.A_BOLD)
         else:
             stdscr.addnstr(row, 4, "[ Save ]", w - 5, curses.A_DIM)
 
         footer = "↑↓ navigate · tab pick option · enter save · esc cancel"
         stdscr.addnstr(h - 1, 2, footer, w - 3, curses.A_DIM)
+
+        # Position cursor after all rendering
+        if on_save:
+            curses.curs_set(0)
+        else:
+            curses.curs_set(1)
+            try:
+                stdscr.move(active_row, cursor_screen_col)
+            except curses.error:
+                pass
 
         stdscr.refresh()
 
