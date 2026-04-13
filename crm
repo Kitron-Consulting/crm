@@ -16,7 +16,9 @@ COMMANDS
   
   note [QUERY] [TEXT]    Add a timestamped note
                          Without args: interactive
-  
+
+  notes [QUERY]          View, edit, delete notes for a contact
+
   stage [QUERY] [STAGE]  Move contact to new stage
                          Without args: interactive
   
@@ -181,6 +183,38 @@ def load_data():
 
     return data
 
+def edit_text(initial="", header=""):
+    """Open $EDITOR for text editing. Returns edited text or None if cancelled."""
+    import tempfile
+    import subprocess
+    editor = os.environ.get("EDITOR", "nano")
+    content = ""
+    if header:
+        content += f"# {header}\n# Lines starting with # are ignored.\n\n"
+    content += initial
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write(content)
+        tmp_path = f.name
+
+    try:
+        # Ensure terminal is in a clean state (curses may not fully restore)
+        curses.endwin()
+        subprocess.run([editor, tmp_path])
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            result = f.read()
+        # Strip comment lines and trim
+        lines = [l for l in result.splitlines() if not l.startswith("#")]
+        text = "\n".join(lines).strip()
+        if not text:
+            return None
+        return text
+    except Exception as e:
+        print(f"{RED}Error: {e}{RESET}")
+        return None
+    finally:
+        os.unlink(tmp_path)
+
 def _parse_tz(tz_str):
     """Parse a timezone string like 'UTC+03:00' or 'UTC-05:00' into a timezone object."""
     if tz_str == "UTC":
@@ -330,8 +364,23 @@ def _curses_pick_one(stdscr, items, prompt, format_fn, filter_fn):
             filtered = [item for item in items if q in strip_ansi(format_fn(item)).lower()]
         cursor = min(cursor, max(0, len(filtered) - 1))
 
+    need_clear = False
+    prev_size = None
     while True:
-        stdscr.erase()
+        try:
+            ts = os.get_terminal_size()
+            new_size = (ts.lines, ts.columns)
+        except OSError:
+            new_size = stdscr.getmaxyx()
+        if new_size != prev_size:
+            curses.resizeterm(*new_size)
+            stdscr.clear()
+            prev_size = new_size
+        elif need_clear:
+            stdscr.clear()
+            need_clear = False
+        else:
+            stdscr.erase()
         h, w = stdscr.getmaxyx()
 
         stdscr.addnstr(0, 0, f"{prompt}:", w - 1, curses.A_BOLD)
@@ -384,9 +433,16 @@ def _curses_pick_one(stdscr, items, prompt, format_fn, filter_fn):
 
         stdscr.refresh()
 
-        key = stdscr.get_wch()
+        try:
+            key = stdscr.get_wch()
+        except curses.error:
+            need_clear = True
+            continue
 
-        if key == "\x1b" or key == "\x03":  # Esc or Ctrl-C
+        if key == curses.KEY_RESIZE:
+            need_clear = True
+            continue
+        elif key == "\x1b" or key == "\x03":  # Esc or Ctrl-C
             return None
         elif key == "\n" or key == "\r" or key == curses.KEY_ENTER:
             if filtered:
@@ -430,8 +486,23 @@ def _curses_form_edit(stdscr, fields, title, pick_fn):
         else:
             errors[i] = ""
 
+    need_clear = False
+    prev_size = None
     while True:
-        stdscr.erase()
+        try:
+            ts = os.get_terminal_size()
+            new_size = (ts.lines, ts.columns)
+        except OSError:
+            new_size = stdscr.getmaxyx()
+        if new_size != prev_size:
+            curses.resizeterm(*new_size)
+            stdscr.clear()
+            prev_size = new_size
+        elif need_clear:
+            stdscr.clear()
+            need_clear = False
+        else:
+            stdscr.erase()
         h, w = stdscr.getmaxyx()
         row = 0
 
@@ -520,9 +591,16 @@ def _curses_form_edit(stdscr, fields, title, pick_fn):
 
         stdscr.refresh()
 
-        key = stdscr.get_wch()
+        try:
+            key = stdscr.get_wch()
+        except curses.error:
+            need_clear = True
+            continue
 
-        if key == "\x1b" or key == "\x03":
+        if key == curses.KEY_RESIZE:
+            need_clear = True
+            continue
+        elif key == "\x1b" or key == "\x03":
             return None
 
         elif key == "\n" or key == "\r" or key == curses.KEY_ENTER:
@@ -724,7 +802,7 @@ def pick_contact_from_matches(data, matches):
         return matches[0]
     stages = get_stages(data)
     fmt = lambda c: format_contact_option(c, stages)
-    return pick_one(matches, prompt="Multiple matches", format_fn=fmt, filter_fn=_contact_filter)
+    return pick_one(matches, prompt=f"Multiple matches ({len(matches)})", format_fn=fmt, filter_fn=_contact_filter)
 
 def find_contact(data, query):
     query = query.lower()
@@ -844,8 +922,10 @@ def cmd_list(args):
     print()
 
 def cmd_show(args):
+    full = "--full" in args
+    args = [a for a in args if a != "--full"]
     if len(args) > 1:
-        print("Usage: crm show [QUERY]")
+        print("Usage: crm show [QUERY] [--full]")
         return
     data = load_data()
     c = get_contact(data, args[0] if args else None, "Show which contact?")
@@ -860,7 +940,7 @@ def cmd_show(args):
     print(f"  {DIM}Email:{RESET}   {CYAN}{c['email']}{RESET}")
     print(f"  {DIM}Phone:{RESET}   {CYAN}{c.get('phone', '')}{RESET}")
     print(f"  {DIM}Role:{RESET}    {c.get('role', '')}")
-    print(f"  {DIM}Source:{RESET}  {c.get('source', '')}")
+    print(f"  {DIM}Source:{RESET}  {BOLD}{c.get('source', '').upper()}{RESET}")
     print(f"  {DIM}Stage:{RESET}   {sc}{BOLD}{c['stage'].upper()}{RESET}")
     tz = get_tz(data)
     today = datetime.now(tz).strftime("%Y-%m-%d")
@@ -873,10 +953,25 @@ def cmd_show(args):
         print(f"  {DIM}Next:{RESET}    {dc}{rel}{RESET} {DIM}—{RESET} {next_action}")
     else:
         print(f"  {DIM}Next:{RESET}    {DIM}none{RESET}")
-    print(f"\n  {BOLD}Notes:{RESET}")
-    for note in c.get("notes", []):
-        print(f"    {DIM}[{note['date']}]{RESET} {note['text']}")
+    notes = c.get("notes", [])
+    try:
+        term_w = os.get_terminal_size().columns
+    except OSError:
+        term_w = 80
+    max_text = term_w - 24  # room for indent + date prefix
+
+    print(f"\n  {BOLD}Notes ({len(notes)}):{RESET}")
+    for note in notes:
+        text = note['text']
+        if full:
+            print(f"    {DIM}[{note['date']}]{RESET} {text}")
+        else:
+            truncated = text[:max_text] + "..." if len(text) > max_text else text
+            print(f"    {DIM}[{note['date']}]{RESET} {truncated}")
     print()
+
+    if not full and any(len(n['text']) > max_text for n in notes):
+        print(f"  {DIM}Use --full to see complete notes{RESET}\n")
 
 def cmd_note(args):
     if len(args) > 2:
@@ -896,13 +991,10 @@ def cmd_note(args):
         return
 
     if not note_text:
-        result = form_edit([
-            {"name": "Note", "value": "", "required": True},
-        ], title=f"Add note to {c['name']}")
-        if not result:
+        note_text = edit_text(header=f"Add note to {c['name']}")
+        if not note_text:
             print(f"  {DIM}Cancelled.{RESET}")
             return
-        note_text = result["Note"]
 
     stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
     if "notes" not in c:
@@ -911,6 +1003,204 @@ def cmd_note(args):
 
     save_data(data)
     print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
+
+def cmd_notes(args):
+    if len(args) > 1:
+        print("Usage: crm notes [QUERY]")
+        return
+    data = load_data()
+    c = get_contact(data, args[0] if args else None, "View notes for which contact?")
+    if not c:
+        return
+
+    notes = c.get("notes", [])
+    if not notes:
+        print(f"  {DIM}No notes for {c['name']}.{RESET}")
+        return
+
+    try:
+        term_w = os.get_terminal_size().columns
+    except OSError:
+        term_w = 80
+    max_text = term_w - 24
+
+    # Show truncated notes
+    print(f"\n{BOLD}{c['name']}{RESET} {DIM}—{RESET} {c['company']}")
+    print(f"{DIM}{'='*50}{RESET}")
+    for note in notes:
+        first_line = note['text'].split('\n')[0]
+        truncated = first_line[:max_text] + "..." if len(first_line) > max_text else first_line
+        multiline = "\n" in note['text']
+        suffix = f" {DIM}[+]{RESET}" if multiline else ""
+        print(f"  {DIM}[{note['date']}]{RESET} {truncated}{suffix}")
+    print()
+
+    if not sys.stdin.isatty():
+        return
+
+    action_result = [None]
+
+    def notes_viewer(stdscr):
+        _init_curses_colors()
+        curses.curs_set(0)
+        cursor = 0
+
+        need_clear = False
+        prev_size = None
+        while True:
+            try:
+                ts = os.get_terminal_size()
+                new_size = (ts.lines, ts.columns)
+            except OSError:
+                new_size = stdscr.getmaxyx()
+            if new_size != prev_size:
+                curses.resizeterm(*new_size)
+                stdscr.clear()
+                prev_size = new_size
+            elif need_clear:
+                stdscr.clear()
+                need_clear = False
+            else:
+                stdscr.erase()
+            h, w = stdscr.getmaxyx()
+
+            # Header
+            title = f"{c['name']} — {c['company']} ({len(notes)} notes)"
+            stdscr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
+
+            # Split: top half = note list, bottom half = preview
+            list_h = max(h // 3, 5)
+            preview_start = list_h + 1
+
+            # Note list
+            for i in range(min(len(notes), list_h - 2)):
+                note = notes[i]
+                first_line = note['text'].split('\n')[0]
+                date_prefix = f"[{note['date']}] "
+                avail = w - 6 - len(date_prefix)
+                truncated = first_line[:avail] + "..." if len(first_line) > avail or '\n' in note['text'] else first_line
+                if i == cursor:
+                    try:
+                        stdscr.addstr(i + 2, 2, "▸ ", curses.color_pair(1))
+                        stdscr.addstr(i + 2, 4, date_prefix, curses.A_DIM)
+                        stdscr.addnstr(i + 2, 4 + len(date_prefix), truncated, avail, curses.A_BOLD)
+                    except curses.error:
+                        pass
+                else:
+                    try:
+                        stdscr.addstr(i + 2, 4, date_prefix, curses.A_DIM)
+                        stdscr.addnstr(i + 2, 4 + len(date_prefix), truncated, avail)
+                    except curses.error:
+                        pass
+
+            # Divider
+            if preview_start < h:
+                try:
+                    stdscr.addnstr(preview_start - 1, 0, "─" * w, w, curses.A_DIM)
+                except curses.error:
+                    pass
+
+            # Preview of selected note
+            if cursor < len(notes):
+                selected = notes[cursor]
+                preview_h = h - preview_start - 2
+                if preview_h > 0 and preview_start < h:
+                    try:
+                        stdscr.addstr(preview_start, 2, f"[{selected['date']}]", curses.A_DIM)
+                    except curses.error:
+                        pass
+                    # Word-wrap the note text, respecting newlines
+                    wrap_w = w - 5
+                    lines = []
+                    for paragraph in selected['text'].splitlines():
+                        if not paragraph:
+                            lines.append("")
+                            continue
+                        while paragraph and len(lines) < preview_h:
+                            if len(paragraph) <= wrap_w:
+                                lines.append(paragraph)
+                                break
+                            cut = paragraph[:wrap_w].rfind(' ')
+                            if cut <= 0:
+                                cut = wrap_w
+                            lines.append(paragraph[:cut])
+                            paragraph = paragraph[cut:].lstrip()
+                        if len(lines) >= preview_h:
+                            break
+                    for j, line in enumerate(lines):
+                        if preview_start + 1 + j < h - 1:
+                            try:
+                                stdscr.addnstr(preview_start + 1 + j, 4, line, w - 5)
+                            except curses.error:
+                                pass
+
+            # Footer
+            footer = "↑↓ navigate · a add · e edit · d delete · esc back"
+            try:
+                stdscr.addnstr(h - 1, 2, footer, w - 3, curses.A_DIM)
+            except curses.error:
+                pass
+
+            stdscr.refresh()
+            try:
+                key = stdscr.get_wch()
+            except curses.error:
+                need_clear = True
+                continue
+
+            if key == curses.KEY_RESIZE:
+                need_clear = True
+                continue
+            elif key == "\x1b" or key == "\x03":
+                return
+            elif key == curses.KEY_UP:
+                if cursor > 0:
+                    cursor -= 1
+            elif key == curses.KEY_DOWN:
+                if cursor < len(notes) - 1:
+                    cursor += 1
+            elif key == "a":
+                action_result[0] = ("add", None)
+                return
+            elif key == "e" and cursor < len(notes):
+                action_result[0] = ("edit", notes[cursor])
+                return
+            elif key == "d" and cursor < len(notes):
+                action_result[0] = ("delete", notes[cursor])
+                return
+
+    try:
+        curses.wrapper(notes_viewer)
+    except KeyboardInterrupt:
+        pass
+
+    if not action_result[0]:
+        return
+
+    action, note = action_result[0]
+
+    if action == "add":
+        text = edit_text(header=f"Add note to {c['name']}")
+        if not text:
+            return
+        stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+        notes.insert(0, {"date": stamp, "text": text})
+        save_data(data)
+        print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
+
+    elif action == "edit":
+        text = edit_text(initial=note["text"], header=f"Edit note from {note['date']}")
+        if not text:
+            return
+        note["text"] = text
+        save_data(data)
+        print(f"{GREEN}Updated note{RESET}")
+
+    elif action == "delete":
+        if prompt_confirm(f"Delete note from {note['date']}?"):
+            notes.remove(note)
+            save_data(data)
+            print(f"{YELLOW}Deleted note{RESET}")
 
 def cmd_stage(args):
     if len(args) > 2:
@@ -1052,7 +1342,7 @@ def cmd_due(args):
         return
 
     actions = ["note", "stage", "next", "show", "edit"]
-    action = pick_one(actions, prompt=f"Action for {c['name']}")
+    action = pick_one(actions, prompt=f"Action for {c['name']} ({c['company']})")
     if not action:
         return
 
@@ -1296,7 +1586,7 @@ def cmd_restore(args):
     if len(matches) == 1:
         c = matches[0]
     else:
-        c = pick_one(matches, prompt="Restore which contact?", format_fn=format_removed)
+        c = pick_one(matches, prompt=f"Restore which contact? ({len(matches)} removed)", format_fn=format_removed)
 
     if not c:
         return
@@ -1468,6 +1758,7 @@ HELP = {
     "due":     "crm due [DAYS]\n  Show overdue and upcoming actions. Default: 7 days.",
     "show":    "crm show [QUERY]\n  Show contact details and note history. Interactive picker if no query.",
     "note":    "crm note [QUERY] [TEXT]\n  Add a timestamped note to a contact. Interactive if args omitted.",
+    "notes":   "crm notes [QUERY]\n  View all notes for a contact. Interactive: add, edit, or delete notes.",
     "stage":   "crm stage [QUERY] [STAGE]\n  Move a contact to a new pipeline stage. Interactive if args omitted.",
     "next":    "crm next [QUERY] [ACTION] [DATE]\n  Set next action and due date. DATE: YYYY-MM-DD or +Nd (e.g. +7d).",
     "edit":    "crm edit [QUERY]\n  Edit a contact using an interactive form.\n\ncrm edit <QUERY> --field value [--field value ...]\n  Edit specific fields non-interactively.\n  Fields: name, email, phone, company, role, source, stage",
@@ -1581,6 +1872,7 @@ def main():
         "ls": cmd_list,
         "show": cmd_show,
         "note": cmd_note,
+        "notes": cmd_notes,
         "stage": cmd_stage,
         "next": cmd_next,
         "due": cmd_due,
