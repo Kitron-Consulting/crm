@@ -112,7 +112,7 @@ DATA_FILE = Path(os.environ.get("CRM_DATA", Path(__file__).resolve().parent / "c
 
 DEFAULT_STAGES = ["cold", "contacted", "responded", "meeting", "proposal", "won", "lost", "dormant"]
 DEFAULT_SOURCES = ["cold", "referral", "inbound"]
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 
 # --- Migrations ---
 # Key = target version. Only add an entry when the schema actually changes.
@@ -142,10 +142,38 @@ def migrate_to_3(data):
     if "sources" not in data["config"]:
         data["config"]["sources"] = DEFAULT_SOURCES[:]
 
+def migrate_to_4(data):
+    """Convert timestamps from local time to UTC."""
+    tz_str = data.get("config", {}).get("timezone")
+    if not tz_str:
+        return  # no timezone configured, can't convert
+    local_tz = _parse_tz(tz_str)
+
+    def to_utc(stamp):
+        if not stamp or len(stamp) <= 10:  # date-only or empty
+            return stamp
+        try:
+            dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
+            dt = dt.replace(tzinfo=local_tz)
+            utc_dt = dt.astimezone(timezone.utc)
+            return utc_dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return stamp
+
+    for c in data.get("contacts", []):
+        for note in c.get("notes", []):
+            note["date"] = to_utc(note["date"])
+    for c in data.get("removed", []):
+        for note in c.get("notes", []):
+            note["date"] = to_utc(note["date"])
+        if "removed_at" in c:
+            c["removed_at"] = to_utc(c["removed_at"])
+
 MIGRATIONS = {
     1: migrate_to_1,
     2: migrate_to_2,
     3: migrate_to_3,
+    4: migrate_to_4,
 }
 
 def get_stages(data):
@@ -182,6 +210,18 @@ def load_data():
         save_data(data)
 
     return data
+
+def display_stamp(stamp, data):
+    """Convert a UTC timestamp to local time for display."""
+    if not stamp or len(stamp) <= 10:  # date-only or empty
+        return stamp
+    try:
+        dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
+        dt = dt.replace(tzinfo=timezone.utc)
+        local_dt = dt.astimezone(get_tz(data))
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return stamp
 
 def edit_text(initial="", header=""):
     """Open $EDITOR for text editing. Returns edited text or None if cancelled."""
@@ -963,11 +1003,12 @@ def cmd_show(args):
     print(f"\n  {BOLD}Notes ({len(notes)}):{RESET}")
     for note in notes:
         text = note['text']
+        ds = display_stamp(note['date'], data)
         if full:
-            print(f"    {DIM}[{note['date']}]{RESET} {text}")
+            print(f"    {DIM}[{ds}]{RESET} {text}")
         else:
             truncated = text[:max_text] + "..." if len(text) > max_text else text
-            print(f"    {DIM}[{note['date']}]{RESET} {truncated}")
+            print(f"    {DIM}[{ds}]{RESET} {truncated}")
     print()
 
     if not full and any(len(n['text']) > max_text for n in notes):
@@ -996,7 +1037,7 @@ def cmd_note(args):
             print(f"  {DIM}Cancelled.{RESET}")
             return
 
-    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     if "notes" not in c:
         c["notes"] = []
     c["notes"].insert(0, {"date": stamp, "text": note_text})
@@ -1032,7 +1073,7 @@ def cmd_notes(args):
         truncated = first_line[:max_text] + "..." if len(first_line) > max_text else first_line
         multiline = "\n" in note['text']
         suffix = f" {DIM}[+]{RESET}" if multiline else ""
-        print(f"  {DIM}[{note['date']}]{RESET} {truncated}{suffix}")
+        print(f"  {DIM}[{display_stamp(note['date'], data)}]{RESET} {truncated}{suffix}")
     print()
 
     if not sys.stdin.isatty():
@@ -1076,7 +1117,7 @@ def cmd_notes(args):
             for i in range(min(len(notes), list_h - 2)):
                 note = notes[i]
                 first_line = note['text'].split('\n')[0]
-                date_prefix = f"[{note['date']}] "
+                date_prefix = f"[{display_stamp(note['date'], data)}] "
                 avail = w - 6 - len(date_prefix)
                 truncated = first_line[:avail] + "..." if len(first_line) > avail or '\n' in note['text'] else first_line
                 if i == cursor:
@@ -1106,7 +1147,7 @@ def cmd_notes(args):
                 preview_h = h - preview_start - 2
                 if preview_h > 0 and preview_start < h:
                     try:
-                        stdscr.addstr(preview_start, 2, f"[{selected['date']}]", curses.A_DIM)
+                        stdscr.addstr(preview_start, 2, f"[{display_stamp(selected['date'], data)}]", curses.A_DIM)
                     except curses.error:
                         pass
                     # Word-wrap the note text, respecting newlines
@@ -1183,13 +1224,13 @@ def cmd_notes(args):
         text = edit_text(header=f"Add note to {c['name']}")
         if not text:
             return
-        stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         notes.insert(0, {"date": stamp, "text": text})
         save_data(data)
         print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
 
     elif action == "edit":
-        text = edit_text(initial=note["text"], header=f"Edit note from {note['date']}")
+        text = edit_text(initial=note["text"], header=f"Edit note from {display_stamp(note['date'], data)}")
         if not text:
             return
         note["text"] = text
@@ -1197,7 +1238,7 @@ def cmd_notes(args):
         print(f"{GREEN}Updated note{RESET}")
 
     elif action == "delete":
-        if prompt_confirm(f"Delete note from {note['date']}?"):
+        if prompt_confirm(f"Delete note from {display_stamp(note['date'], data)}?"):
             notes.remove(note)
             save_data(data)
             print(f"{YELLOW}Deleted note{RESET}")
@@ -1231,7 +1272,7 @@ def cmd_stage(args):
     old_stage = c["stage"]
     c["stage"] = new_stage
     
-    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     if "notes" not in c:
         c["notes"] = []
     c["notes"].insert(0, {"date": stamp, "text": f"Stage: {old_stage} → {new_stage}"})
@@ -1436,7 +1477,7 @@ def cmd_add(args):
             print(f"  {DIM}Cancelled.{RESET}")
             return
 
-    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
     contact = {
         "name": result["Name"],
@@ -1554,7 +1595,7 @@ def cmd_rm(args):
         return
     
     data["contacts"].remove(c)
-    stamp = datetime.now(get_tz(data)).strftime("%Y-%m-%d %H:%M")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     c["removed_at"] = stamp
     data["removed"].append(c)
     save_data(data)
@@ -1581,7 +1622,8 @@ def cmd_restore(args):
         return
 
     def format_removed(c):
-        return f"{c['name']} ({c['company']}) [removed {c.get('removed_at', '?')}]"
+        ra = display_stamp(c.get('removed_at', '?'), data)
+        return f"{c['name']} ({c['company']}) [removed {ra}]"
 
     if len(matches) == 1:
         c = matches[0]
@@ -1733,7 +1775,7 @@ def cmd_search(args):
         # Search notes
         for note in c.get("notes", []):
             if term in note["text"].lower():
-                matches.append(f"[{note['date']}] {note['text'][:60]}...")
+                matches.append(f"[{display_stamp(note['date'], data)}] {note['text'][:60]}...")
         
         if matches:
             results.append((c, matches))
