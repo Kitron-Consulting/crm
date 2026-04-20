@@ -25,6 +25,13 @@ COMMANDS
   next [QUERY] [ACTION] [DATE]
                          Set next action and due date
                          DATE can be YYYY-MM-DD or relative like +7d
+
+  done [QUERY]           Mark current action as completed
+
+  followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL]
+                         Send a templated follow-up email
+
+  templates              List email templates
   
   edit [QUERY] [--field value ...]
                          Edit contact (interactive form, or set fields directly)
@@ -33,10 +40,12 @@ COMMANDS
                          Add new contact (interactive form, or pass flags)
   add stage [NAME]       Add a stage
   add source [NAME]      Add a source
+  add template [NAME]    Add/edit an email template
 
   rm contact [QUERY] [-y]  Remove a contact (soft delete, -y to skip confirm)
   rm stage [NAME]        Remove a stage (if empty)
   rm source [NAME]       Remove a source (if unused)
+  rm template [NAME]     Remove an email template
 
   restore [QUERY]        Restore a removed contact
 
@@ -78,6 +87,8 @@ import sys
 import os
 import re
 import readline  # enables line editing (arrow keys, history) in input()
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1243,6 +1254,252 @@ def cmd_notes(args):
             save_data(data)
             print(f"{YELLOW}Deleted note{RESET}")
 
+def get_templates(data):
+    return data.get("config", {}).get("templates", {})
+
+def get_smtp_config(data):
+    return data.get("config", {}).get("smtp")
+
+def contact_context(c):
+    """Build substitution context for a contact."""
+    name = c.get("name", "")
+    first_name = name.split()[0] if name else ""
+    return {
+        "name": name,
+        "first_name": first_name,
+        "company": c.get("company", ""),
+        "role": c.get("role", ""),
+        "email": c.get("email", ""),
+        "phone": c.get("phone", ""),
+    }
+
+def render_template(text, ctx):
+    """Replace {field} placeholders. Missing fields become empty strings."""
+    def replace(match):
+        return ctx.get(match.group(1), "")
+    return re.sub(r'\{(\w+)\}', replace, text)
+
+def send_email(smtp_cfg, to_addr, subject, body):
+    """Send an email via SMTP. Raises exception on failure."""
+    msg = EmailMessage()
+    from_addr = smtp_cfg["user"]
+    from_name = smtp_cfg.get("from_name", "")
+    msg["From"] = f"{from_name} <{from_addr}>" if from_name else from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    host = smtp_cfg["host"]
+    port = smtp_cfg.get("port", 587)
+    with smtplib.SMTP(host, port, timeout=30) as s:
+        s.starttls()
+        s.login(smtp_cfg["user"], smtp_cfg["password"])
+        s.send_message(msg)
+
+def cmd_followup(args):
+    # Parse flags
+    dry_run = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    template_name = None
+    override_to = None
+    query = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--template" and i + 1 < len(args):
+            template_name = args[i + 1]
+            i += 2
+        elif args[i] == "--to" and i + 1 < len(args):
+            override_to = args[i + 1]
+            i += 2
+        elif query is None:
+            query = args[i]
+            i += 1
+        else:
+            print(f"Unknown arg: {args[i]}")
+            return
+
+    data = load_data()
+    templates = get_templates(data)
+    if not templates:
+        print(f"{RED}No templates configured.{RESET} Add one with: crm add template <name>")
+        return
+
+    c = get_contact(data, query, "Send follow-up to which contact?")
+    if not c:
+        return
+
+    if not c.get("email"):
+        print(f"{RED}{c['name']} has no email address.{RESET}")
+        return
+
+    # Pick template
+    if template_name:
+        if template_name not in templates:
+            print(f"{RED}Template '{template_name}' not found.{RESET} Available: {', '.join(templates)}")
+            return
+    else:
+        template_name = pick_one(sorted(templates.keys()), prompt="Select template")
+        if not template_name:
+            return
+
+    tmpl = templates[template_name]
+    ctx = contact_context(c)
+    subject = render_template(tmpl.get("subject", ""), ctx)
+    body = render_template(tmpl.get("body", ""), ctx)
+
+    to_addr = override_to or c["email"]
+
+    # Open editor with filled template
+    initial = f"Subject: {subject}\n\n{body}"
+    header = f"To: {to_addr} · Close without saving to cancel"
+    edited = edit_text(initial=initial, header=header)
+    if not edited:
+        print(f"  {DIM}Cancelled.{RESET}")
+        return
+
+    # Parse subject + body back
+    lines = edited.splitlines()
+    if not lines or not lines[0].startswith("Subject: "):
+        print(f"{RED}First line must be: Subject: <subject>{RESET}")
+        return
+    subject = lines[0][len("Subject: "):].strip()
+    # Skip blank lines after subject
+    idx = 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    body = "\n".join(lines[idx:])
+    if not subject or not body.strip():
+        print(f"{RED}Subject and body required.{RESET}")
+        return
+
+    # Show summary
+    print(f"\n{DIM}{'='*50}{RESET}")
+    print(f"{DIM}To:{RESET}      {to_addr}")
+    print(f"{DIM}Subject:{RESET} {BOLD}{subject}{RESET}")
+    print(f"{DIM}{'-'*50}{RESET}")
+    print(body)
+    print(f"{DIM}{'='*50}{RESET}")
+
+    if dry_run:
+        print(f"\n{YELLOW}Dry run — email not sent.{RESET}")
+        return
+
+    smtp_cfg = get_smtp_config(data)
+    if not smtp_cfg:
+        print(f"{RED}SMTP not configured. Set it in config.{RESET}")
+        return
+
+    if not prompt_confirm(f"Send this email to {to_addr}?", default=True):
+        print(f"  {DIM}Cancelled.{RESET}")
+        return
+
+    try:
+        send_email(smtp_cfg, to_addr, subject, body)
+    except Exception as e:
+        print(f"{RED}Send failed: {e}{RESET}")
+        return
+
+    # Log as note
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    if "notes" not in c:
+        c["notes"] = []
+    note_text = f"Sent email: {subject}"
+    if override_to:
+        note_text += f" (to {override_to})"
+    c["notes"].insert(0, {"date": stamp, "text": note_text})
+
+    # Optionally set next action
+    if prompt_confirm("Set follow-up reminder?", default=True):
+        tz = get_tz(data)
+        date = (datetime.now(tz) + timedelta(days=7)).strftime("%Y-%m-%d")
+        c["next_action"] = "Wait for response"
+        c["next_date"] = date
+        print(f"{DIM}Set next: {c['next_action']} on {date}{RESET}")
+
+    save_data(data)
+    print(f"{GREEN}Sent to {BOLD}{to_addr}{RESET}")
+
+def cmd_add_template(args):
+    if not args:
+        print("Usage: crm add template <name>")
+        return
+    name = args[0]
+    data = load_data()
+    if "templates" not in data["config"]:
+        data["config"]["templates"] = {}
+    templates = data["config"]["templates"]
+    existing = templates.get(name, {"subject": "", "body": ""})
+
+    initial = f"Subject: {existing['subject']}\n\n{existing['body']}"
+    header = f"Template: {name} · Use {{name}}, {{first_name}}, {{company}}, {{role}}, {{email}}, {{phone}}"
+    edited = edit_text(initial=initial, header=header)
+    if not edited:
+        print(f"  {DIM}Cancelled.{RESET}")
+        return
+
+    lines = edited.splitlines()
+    if not lines or not lines[0].startswith("Subject: "):
+        print(f"{RED}First line must be: Subject: <subject>{RESET}")
+        return
+    subject = lines[0][len("Subject: "):].strip()
+    idx = 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    body = "\n".join(lines[idx:])
+
+    templates[name] = {"subject": subject, "body": body}
+    save_data(data)
+    print(f"{GREEN}Saved template: {BOLD}{name}{RESET}")
+
+def cmd_rm_template(args):
+    if not args:
+        print("Usage: crm rm template <name>")
+        return
+    name = args[0]
+    data = load_data()
+    templates = data.get("config", {}).get("templates", {})
+    if name not in templates:
+        print(f"Template '{name}' not found.")
+        return
+    del templates[name]
+    save_data(data)
+    print(f"{YELLOW}Removed template: {BOLD}{name}{RESET}")
+
+def cmd_templates(args):
+    data = load_data()
+    templates = get_templates(data)
+    if not templates:
+        print(f"  {DIM}No templates. Add one with: crm add template <name>{RESET}")
+        return
+    print("Templates:")
+    for name, t in sorted(templates.items()):
+        print(f"  {BOLD}{name}{RESET} {DIM}—{RESET} {t.get('subject', '')}")
+
+def cmd_done(args):
+    if len(args) > 1:
+        print("Usage: crm done [QUERY]")
+        return
+    data = load_data()
+    c = get_contact(data, args[0] if args else None, "Mark done for which contact?")
+    if not c:
+        return
+
+    action = c.get("next_action", "")
+    date = c.get("next_date", "")
+    if not action:
+        print(f"  {DIM}No action set for {c['name']}.{RESET}")
+        return
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    if "notes" not in c:
+        c["notes"] = []
+    c["notes"].insert(0, {"date": stamp, "text": f"Done: {action}"})
+    c["next_action"] = ""
+    c["next_date"] = ""
+
+    save_data(data)
+    print(f"{GREEN}Completed: {BOLD}{action}{RESET} {DIM}({c['name']}){RESET}")
+
 def cmd_stage(args):
     if len(args) > 2:
         print("Usage: crm stage [QUERY] [STAGE]")
@@ -1382,12 +1639,16 @@ def cmd_due(args):
     if not c:
         return
 
-    actions = ["note", "stage", "next", "show", "edit"]
+    actions = ["done", "followup", "note", "stage", "next", "show", "edit"]
     action = pick_one(actions, prompt=f"Action for {c['name']} ({c['company']})")
     if not action:
         return
 
-    if action == "note":
+    if action == "done":
+        cmd_done([c["name"]])
+    elif action == "followup":
+        cmd_followup([c["name"]])
+    elif action == "note":
         cmd_note([c["name"]])
     elif action == "stage":
         cmd_stage([c["name"]])
@@ -1400,14 +1661,16 @@ def cmd_due(args):
 
 def cmd_add(args):
     if not args:
-        print("Usage: crm add <contact|stage|source>")
+        print("Usage: crm add <contact|stage|source|template>")
         return
     if args[0] == "stage":
         return cmd_add_stage(args[1:])
     if args[0] == "source":
         return cmd_add_source(args[1:])
+    if args[0] == "template":
+        return cmd_add_template(args[1:])
     if args[0] != "contact":
-        print(f"Unknown: crm add {args[0]}. Use: crm add <contact|stage|source>")
+        print(f"Unknown: crm add {args[0]}. Use: crm add <contact|stage|source|template>")
         return
 
     # Parse --flags for non-interactive use
@@ -1570,14 +1833,16 @@ def cmd_edit(args):
 
 def cmd_rm(args):
     if not args:
-        print("Usage: crm rm <contact|stage|source>")
+        print("Usage: crm rm <contact|stage|source|template>")
         return
     if args[0] == "stage":
         return cmd_rm_stage(args[1:])
     if args[0] == "source":
         return cmd_rm_source(args[1:])
+    if args[0] == "template":
+        return cmd_rm_template(args[1:])
     if args[0] != "contact":
-        print(f"Unknown: crm rm {args[0]}. Use: crm rm <contact|stage|source>")
+        print(f"Unknown: crm rm {args[0]}. Use: crm rm <contact|stage|source|template>")
         return
 
     rest = args[1:]
@@ -1803,9 +2068,12 @@ HELP = {
     "notes":   "crm notes [QUERY]\n  View all notes for a contact. Interactive: add, edit, or delete notes.",
     "stage":   "crm stage [QUERY] [STAGE]\n  Move a contact to a new pipeline stage. Interactive if args omitted.",
     "next":    "crm next [QUERY] [ACTION] [DATE]\n  Set next action and due date. DATE: YYYY-MM-DD or +Nd (e.g. +7d).",
+    "done":    "crm done [QUERY]\n  Mark current action as completed. Logs it as a note and clears the action.",
+    "followup": "crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL]\n  Send a templated email. Opens $EDITOR to review before sending.\n  Templates support: {name} {first_name} {company} {role} {email} {phone}\n  --dry-run shows the email without sending.\n  --to overrides the recipient (for testing).",
+    "templates": "crm templates\n  List configured email templates.",
     "edit":    "crm edit [QUERY]\n  Edit a contact using an interactive form.\n\ncrm edit <QUERY> --field value [--field value ...]\n  Edit specific fields non-interactively.\n  Fields: name, email, phone, company, role, source, stage",
-    "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add contact --name X [--email X] [--phone X] [--company X] [--role X] [--source X] [--stage X]\n  Add a contact non-interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.\n\ncrm add source <name>\n  Add a new contact source.",
-    "rm":      "crm rm contact [QUERY] [-y]\n  Soft-delete a contact. Use -y to skip confirmation.\n\ncrm rm stage <name>\n  Remove a stage (must have no contacts in it).\n\ncrm rm source <name>\n  Remove a source (must have no contacts using it).",
+    "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add contact --name X [--email X] [--phone X] [--company X] [--role X] [--source X] [--stage X]\n  Add a contact non-interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.\n\ncrm add source <name>\n  Add a new contact source.\n\ncrm add template <name>\n  Add/edit an email template in $EDITOR.",
+    "rm":      "crm rm contact [QUERY] [-y]\n  Soft-delete a contact. Use -y to skip confirmation.\n\ncrm rm stage <name>\n  Remove a stage (must have no contacts in it).\n\ncrm rm source <name>\n  Remove a source (must have no contacts using it).\n\ncrm rm template <name>\n  Remove an email template.",
     "restore": "crm restore [QUERY]\n  Restore a previously removed contact.",
     "search":  "crm search <TERM>\n  Search across all contact fields and notes.",
     "stages":  "crm stages\n  List all pipeline stages.",
@@ -1918,6 +2186,9 @@ def main():
         "stage": cmd_stage,
         "next": cmd_next,
         "due": cmd_due,
+        "done": cmd_done,
+        "followup": cmd_followup,
+        "templates": cmd_templates,
         "add": cmd_add,
         "edit": cmd_edit,
         "rm": cmd_rm,

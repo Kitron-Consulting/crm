@@ -34,16 +34,22 @@ crm show [QUERY]           Contact details + history
 crm note [QUERY] [TEXT]    Add a timestamped note
 crm stage [QUERY] [STAGE]  Move to new stage
 crm next [QUERY] [ACTION] [DATE]   Set next action
+crm done [QUERY]           Mark current action as completed
+crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL]
+                           Send a templated follow-up email
 crm edit [QUERY] [--field value ...]   Edit contact
 crm add contact [--name X ...]         Add new contact
 crm add stage [NAME]       Add a stage
 crm add source [NAME]      Add a source
+crm add template [NAME]    Add/edit an email template
 crm rm contact [QUERY] [-y]  Remove contact (soft delete)
 crm rm stage [NAME]        Remove a stage (if empty)
 crm rm source [NAME]       Remove a source (if unused)
+crm rm template [NAME]     Remove an email template
 crm restore [QUERY]        Restore a removed contact
 crm search TERM            Search across everything
 crm stages                 List stages
+crm templates              List email templates
 crm config [KEY] [VALUE]   Get/set config (e.g., timezone)
 crm help [COMMAND]         Show help for a command
 ```
@@ -108,6 +114,52 @@ crm config timezone UTC+02:00   # set a value
 ```
 
 Timezone is auto-detected on first run. Config is stored in `crm_data.json`.
+
+## Email templates and follow-ups
+
+Add an SMTP config manually to `crm_data.json`:
+
+```json
+"config": {
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "user": "you@example.com",
+    "password": "app-password",
+    "from_name": "Your Name"
+  }
+}
+```
+
+Create a template (opens `$EDITOR`):
+
+```bash
+crm add template follow_up
+```
+
+Template format:
+```
+Subject: Following up — {company}
+
+Hi {first_name},
+
+Just wanted to check in about our conversation...
+```
+
+Supported placeholders: `{name}` `{first_name}` `{company}` `{role}` `{email}` `{phone}`
+
+Send a follow-up:
+
+```bash
+crm followup acme                          # interactive (pick template, review, send)
+crm followup acme --template follow_up     # specific template
+crm followup acme --dry-run                # print without sending
+crm followup acme --to you@example.com     # override recipient (testing)
+```
+
+The email opens in `$EDITOR` for review. Save = send. Empty = cancel. Sent emails are logged as notes.
+
+**Security note:** SMTP password is stored plaintext in `crm_data.json`. Keep that file private (`chmod 600`).
 
 ## Data
 

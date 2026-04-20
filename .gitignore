@@ -6,6 +6,9 @@ demo.sh
 *.cast
 demo_runner.py
 
+# Test setup script
+test_setup.sh
+
 # Python
 __pycache__/
 *.pyc
