@@ -35,8 +35,9 @@ crm note [QUERY] [TEXT]    Add a timestamped note
 crm stage [QUERY] [STAGE]  Move to new stage
 crm next [QUERY] [ACTION] [DATE]   Set next action
 crm done [QUERY]           Mark current action as completed
-crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL]
+crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL] [--no-context]
                            Send a templated follow-up email
+crm thread [QUERY]         Browse recent email thread with a contact
 crm edit [QUERY] [--field value ...]   Edit contact
 crm add contact [--name X ...]         Add new contact
 crm add stage [NAME]       Add a stage
@@ -127,9 +128,24 @@ Add an SMTP config manually to `crm_data.json`:
     "user": "you@example.com",
     "password": "app-password",
     "from_name": "Your Name"
+  },
+  "imap": {
+    "host": "imap.gmail.com",
+    "port": 993,
+    "user": "you@example.com",
+    "password": "app-password",
+    "sent_folder": "Sent",
+    "inbox_folder": "INBOX"
   }
 }
 ```
+
+The `imap` block is optional — if set:
+- Sent emails are saved to your Sent folder so they show up in webmail
+- `crm followup` shows recent exchange as context and warns if the contact replied after your last message
+- `crm thread <query>` lets you browse full email history with a contact
+
+Most providers don't auto-save SMTP-sent emails (Gmail does, Fastmail/Office365/custom domains usually don't).
 
 Create a template (opens `$EDITOR`):
 

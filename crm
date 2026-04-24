@@ -28,8 +28,11 @@ COMMANDS
 
   done [QUERY]           Mark current action as completed
 
-  followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL]
+  followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL] [--no-context]
                          Send a templated follow-up email
+                         Shows recent IMAP exchange as context by default
+
+  thread [QUERY]         Browse recent email thread with a contact
 
   templates              List email templates
   
@@ -88,7 +91,11 @@ import os
 import re
 import readline  # enables line editing (arrow keys, history) in input()
 import smtplib
+import imaplib
+import email as emaillib
 from email.message import EmailMessage
+from email.utils import parseaddr, parsedate_to_datetime, formatdate, make_msgid
+from email.header import decode_header
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -235,13 +242,19 @@ def display_stamp(stamp, data):
         return stamp
 
 def edit_text(initial="", header=""):
-    """Open $EDITOR for text editing. Returns edited text or None if cancelled."""
+    """Open $EDITOR for text editing. Returns edited text or None if cancelled.
+
+    header can be a string or a list of strings; each becomes a # comment line.
+    """
     import tempfile
     import subprocess
     editor = os.environ.get("EDITOR", "nano")
     content = ""
     if header:
-        content += f"# {header}\n# Lines starting with # are ignored.\n\n"
+        lines = header if isinstance(header, list) else [header]
+        for line in lines:
+            content += f"# {line}\n"
+        content += "# Lines starting with # are ignored.\n\n"
     content += initial
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -250,7 +263,10 @@ def edit_text(initial="", header=""):
 
     try:
         # Ensure terminal is in a clean state (curses may not fully restore)
-        curses.endwin()
+        try:
+            curses.endwin()
+        except curses.error:
+            pass
         subprocess.run([editor, tmp_path])
         with open(tmp_path, "r", encoding="utf-8") as f:
             result = f.read()
@@ -1279,16 +1295,21 @@ def render_template(text, ctx):
         return ctx.get(match.group(1), "")
     return re.sub(r'\{(\w+)\}', replace, text)
 
-def send_email(smtp_cfg, to_addr, subject, body):
-    """Send an email via SMTP. Raises exception on failure."""
+def build_message(smtp_cfg, to_addr, subject, body):
+    """Build an EmailMessage."""
     msg = EmailMessage()
     from_addr = smtp_cfg["user"]
     from_name = smtp_cfg.get("from_name", "")
     msg["From"] = f"{from_name} <{from_addr}>" if from_name else from_addr
     msg["To"] = to_addr
     msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=from_addr.split("@")[-1] if "@" in from_addr else "localhost")
     msg.set_content(body)
+    return msg
 
+def send_email(smtp_cfg, msg):
+    """Send an EmailMessage via SMTP. Raises exception on failure."""
     host = smtp_cfg["host"]
     port = smtp_cfg.get("port", 587)
     with smtplib.SMTP(host, port, timeout=30) as s:
@@ -1296,10 +1317,124 @@ def send_email(smtp_cfg, to_addr, subject, body):
         s.login(smtp_cfg["user"], smtp_cfg["password"])
         s.send_message(msg)
 
+def save_to_sent(imap_cfg, msg):
+    """Append a sent message to the IMAP Sent folder."""
+    host = imap_cfg["host"]
+    port = imap_cfg.get("port", 993)
+    user = imap_cfg["user"]
+    password = imap_cfg["password"]
+    folder = imap_cfg.get("sent_folder", "Sent")
+
+    with imaplib.IMAP4_SSL(host, port) as m:
+        m.login(user, password)
+        # \Seen flag so it doesn't show as unread
+        m.append(folder, "\\Seen", imaplib.Time2Internaldate(datetime.now().timestamp()), msg.as_bytes())
+
+def decode_mime_header(raw):
+    """Decode MIME-encoded header (RFC 2047) to a plain string."""
+    if not raw:
+        return ""
+    parts = []
+    for chunk, enc in decode_header(raw):
+        if isinstance(chunk, bytes):
+            try:
+                parts.append(chunk.decode(enc or "utf-8", errors="replace"))
+            except Exception:
+                parts.append(chunk.decode("utf-8", errors="replace"))
+        else:
+            parts.append(chunk)
+    return "".join(parts)
+
+def extract_body(msg):
+    """Extract plain text body from an email message."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain" and not part.get("Content-Disposition", "").startswith("attachment"):
+                try:
+                    return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
+                except Exception:
+                    continue
+        # Fall back to HTML if no plain text
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                try:
+                    html = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
+                    # Crude HTML strip
+                    return re.sub(r'<[^>]+>', '', html)
+                except Exception:
+                    continue
+        return ""
+    try:
+        return msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", errors="replace")
+    except Exception:
+        return msg.get_payload() or ""
+
+def _fetch_folder(imap, folder, contact_email, direction):
+    """Fetch messages from a folder involving contact_email. Returns list of dicts."""
+    results = []
+    try:
+        typ, _ = imap.select(folder, readonly=True)
+        if typ != "OK":
+            return results
+        # Search both From and To for the contact
+        if direction == "inbound":
+            typ, data = imap.search(None, 'FROM', f'"{contact_email}"')
+        else:  # outbound
+            typ, data = imap.search(None, 'TO', f'"{contact_email}"')
+        if typ != "OK" or not data or not data[0]:
+            return results
+        ids = data[0].split()
+        # Limit to most recent 50
+        for msg_id in ids[-50:]:
+            typ, fetched = imap.fetch(msg_id, "(RFC822)")
+            if typ != "OK":
+                continue
+            raw = fetched[0][1]
+            msg = emaillib.message_from_bytes(raw)
+            date_str = msg.get("Date", "")
+            try:
+                dt = parsedate_to_datetime(date_str)
+            except Exception:
+                dt = None
+            from_name, from_addr = parseaddr(msg.get("From", ""))
+            to_name, to_addr = parseaddr(msg.get("To", ""))
+            results.append({
+                "dt": dt,
+                "date": dt.strftime("%Y-%m-%d %H:%M") if dt else date_str,
+                "direction": direction,
+                "from": from_addr,
+                "to": to_addr,
+                "subject": decode_mime_header(msg.get("Subject", "")),
+                "body": extract_body(msg),
+            })
+    except Exception:
+        pass
+    return results
+
+def fetch_thread(imap_cfg, contact_email):
+    """Fetch recent messages between the user and a contact. Returns sorted list."""
+    host = imap_cfg["host"]
+    port = imap_cfg.get("port", 993)
+    user = imap_cfg["user"]
+    password = imap_cfg["password"]
+    inbox = imap_cfg.get("inbox_folder", "INBOX")
+    sent = imap_cfg.get("sent_folder", "Sent")
+
+    messages = []
+    with imaplib.IMAP4_SSL(host, port) as m:
+        m.login(user, password)
+        messages.extend(_fetch_folder(m, inbox, contact_email, "inbound"))
+        messages.extend(_fetch_folder(m, sent, contact_email, "outbound"))
+
+    # Sort by date (newest first)
+    messages.sort(key=lambda x: x["dt"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return messages
+
 def cmd_followup(args):
     # Parse flags
     dry_run = "--dry-run" in args
-    args = [a for a in args if a != "--dry-run"]
+    no_context = "--no-context" in args
+    args = [a for a in args if a != "--dry-run" and a != "--no-context"]
     template_name = None
     override_to = None
     query = None
@@ -1332,6 +1467,43 @@ def cmd_followup(args):
         print(f"{RED}{c['name']} has no email address.{RESET}")
         return
 
+    # Fetch email context if IMAP configured
+    imap_cfg = data.get("config", {}).get("imap")
+    context_lines = []
+    recent_messages = []
+    if imap_cfg and not no_context and sys.stdin.isatty():
+        print(f"{DIM}Fetching recent messages...{RESET}")
+        try:
+            messages = fetch_thread(imap_cfg, c["email"])
+        except Exception as e:
+            print(f"{YELLOW}Warning: couldn't fetch thread: {e}{RESET}")
+            messages = []
+
+        if messages:
+            last_in = next((m for m in messages if m["direction"] == "inbound"), None)
+            last_out = next((m for m in messages if m["direction"] == "outbound"), None)
+            recent_messages = [m for m in [last_in, last_out] if m]
+
+            for m in recent_messages:
+                arrow = "from" if m["direction"] == "inbound" else "to"
+                snippet = m['body'].strip().split('\n')[0][:100]
+                context_lines.append(f"[{m['date']}] {arrow} {c['email']}: {m['subject']}")
+                if snippet:
+                    context_lines.append(f"    {snippet}")
+
+            # Warn if they replied since your last send — ask before going further
+            if last_in and last_out and last_in["dt"] and last_out["dt"]:
+                if last_in["dt"] > last_out["dt"]:
+                    print(f"\n  {YELLOW}{BOLD}⚠ They replied after your last message.{RESET}")
+                    arrow_in = "from"
+                    print(f"  {DIM}[{last_in['date']}]{RESET} {CYAN}←{RESET} {BOLD}{last_in['subject']}{RESET}")
+                    snip = last_in['body'].strip().split('\n')[0][:120]
+                    if snip:
+                        print(f"      {DIM}{snip}{RESET}")
+                    if not prompt_confirm("Continue with followup?"):
+                        print(f"  {DIM}Cancelled.{RESET}")
+                        return
+
     # Pick template
     if template_name:
         if template_name not in templates:
@@ -1349,9 +1521,40 @@ def cmd_followup(args):
 
     to_addr = override_to or c["email"]
 
+    # Offer to view recent messages in pager before composing
+    if recent_messages and sys.stdin.isatty():
+        if prompt_confirm("View recent messages before composing?", default=False):
+            import subprocess
+            content = ""
+            for m in recent_messages:
+                arrow = "← from" if m["direction"] == "inbound" else "→ to"
+                addr = m['from'] if m['direction'] == 'inbound' else m['to']
+                content += (
+                    f"Date:    {m['date']}\n"
+                    f"{arrow}: {addr}\n"
+                    f"Subject: {m['subject'] or '(no subject)'}\n"
+                    f"{'-' * 60}\n\n"
+                    f"{m['body']}\n\n"
+                    f"{'=' * 60}\n\n"
+                )
+            pager = os.environ.get("PAGER", "less")
+            try:
+                subprocess.run([pager], input=content, text=True)
+            except FileNotFoundError:
+                print(content)
+                input("Press enter to continue...")
+
     # Open editor with filled template
     initial = f"Subject: {subject}\n\n{body}"
-    header = f"To: {to_addr} · Close without saving to cancel"
+    header = [
+        f"To: {to_addr}",
+        "Format: first line 'Subject: <subject>', blank line, then the body.",
+        "You'll be asked to confirm before sending.",
+    ]
+    if context_lines:
+        header.append("")
+        header.append("Recent exchange:")
+        header.extend(context_lines)
     edited = edit_text(initial=initial, header=header)
     if not edited:
         print(f"  {DIM}Cancelled.{RESET}")
@@ -1393,11 +1596,21 @@ def cmd_followup(args):
         print(f"  {DIM}Cancelled.{RESET}")
         return
 
+    msg = build_message(smtp_cfg, to_addr, subject, body)
+
     try:
-        send_email(smtp_cfg, to_addr, subject, body)
+        send_email(smtp_cfg, msg)
     except Exception as e:
         print(f"{RED}Send failed: {e}{RESET}")
         return
+
+    # Save to IMAP Sent folder if configured
+    imap_cfg = data.get("config", {}).get("imap")
+    if imap_cfg:
+        try:
+            save_to_sent(imap_cfg, msg)
+        except Exception as e:
+            print(f"{YELLOW}Warning: sent, but couldn't save to IMAP Sent folder: {e}{RESET}")
 
     # Log as note
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -1431,7 +1644,11 @@ def cmd_add_template(args):
     existing = templates.get(name, {"subject": "", "body": ""})
 
     initial = f"Subject: {existing['subject']}\n\n{existing['body']}"
-    header = f"Template: {name} · Use {{name}}, {{first_name}}, {{company}}, {{role}}, {{email}}, {{phone}}"
+    header = [
+        f"Template: {name}",
+        "Format: first line 'Subject: <subject>', blank line, then the body.",
+        "Placeholders: {name} {first_name} {company} {role} {email} {phone}",
+    ]
     edited = edit_text(initial=initial, header=header)
     if not edited:
         print(f"  {DIM}Cancelled.{RESET}")
@@ -1474,6 +1691,199 @@ def cmd_templates(args):
     print("Templates:")
     for name, t in sorted(templates.items()):
         print(f"  {BOLD}{name}{RESET} {DIM}—{RESET} {t.get('subject', '')}")
+
+def cmd_thread(args):
+    if len(args) > 1:
+        print("Usage: crm thread [QUERY]")
+        return
+    data = load_data()
+    imap_cfg = data.get("config", {}).get("imap")
+    if not imap_cfg:
+        print(f"{RED}IMAP not configured. Add config.imap to crm_data.json.{RESET}")
+        return
+
+    c = get_contact(data, args[0] if args else None, "Show thread for which contact?")
+    if not c:
+        return
+    if not c.get("email"):
+        print(f"{RED}{c['name']} has no email address.{RESET}")
+        return
+
+    print(f"{DIM}Fetching messages for {c['email']}...{RESET}")
+    try:
+        messages = fetch_thread(imap_cfg, c["email"])
+    except Exception as e:
+        print(f"{RED}IMAP fetch failed: {e}{RESET}")
+        return
+
+    if not messages:
+        print(f"  {DIM}No messages found for {c['email']}.{RESET}")
+        return
+
+    # Non-interactive: print summary
+    if not sys.stdin.isatty():
+        print(f"\n{BOLD}Thread: {c['name']} ({c['email']}){RESET}")
+        for m in messages:
+            arrow = "←" if m["direction"] == "inbound" else "→"
+            dc = CYAN if m["direction"] == "inbound" else GREEN
+            print(f"  {DIM}[{m['date']}]{RESET} {dc}{arrow}{RESET} {BOLD}{m['subject']}{RESET}")
+        return
+
+    # Interactive curses viewer (reuse notes viewer pattern)
+    cursor = 0
+
+    def thread_viewer(stdscr):
+        _init_curses_colors()
+        curses.curs_set(0)
+        nonlocal cursor
+
+        need_clear = False
+        prev_size = None
+        while True:
+            try:
+                ts = os.get_terminal_size()
+                new_size = (ts.lines, ts.columns)
+            except OSError:
+                new_size = stdscr.getmaxyx()
+            if new_size != prev_size:
+                curses.resizeterm(*new_size)
+                stdscr.clear()
+                prev_size = new_size
+            elif need_clear:
+                stdscr.clear()
+                need_clear = False
+            else:
+                stdscr.erase()
+            h, w = stdscr.getmaxyx()
+
+            # Header
+            title = f"Thread: {c['name']} — {c['email']} ({len(messages)} messages)"
+            stdscr.addnstr(0, 0, title, w - 1, curses.A_BOLD)
+
+            # Split: top = list, bottom = preview
+            list_h = max(h // 3, 5)
+            preview_start = list_h + 1
+
+            for i in range(min(len(messages), list_h - 2)):
+                m = messages[i]
+                arrow = "← " if m["direction"] == "inbound" else "→ "
+                color = curses.color_pair(3) if m["direction"] == "inbound" else curses.color_pair(1)
+                date_prefix = f"[{m['date']}] "
+                subj = m['subject'] or "(no subject)"
+                row_i = i + 2
+                try:
+                    if i == cursor:
+                        stdscr.addstr(row_i, 2, "▸ ", curses.color_pair(1))
+                    stdscr.addstr(row_i, 4, date_prefix, curses.A_DIM)
+                    stdscr.addstr(row_i, 4 + len(date_prefix), arrow, color)
+                    avail = w - 6 - len(date_prefix) - len(arrow)
+                    attr = curses.A_BOLD if i == cursor else 0
+                    stdscr.addnstr(row_i, 4 + len(date_prefix) + len(arrow), subj[:avail], avail, attr)
+                except curses.error:
+                    pass
+
+            # Divider
+            if preview_start < h:
+                try:
+                    stdscr.addnstr(preview_start - 1, 0, "─" * w, w, curses.A_DIM)
+                except curses.error:
+                    pass
+
+            # Preview
+            if cursor < len(messages):
+                m = messages[cursor]
+                preview_h = h - preview_start - 2
+                if preview_h > 0 and preview_start < h:
+                    header_line = f"[{m['date']}] {'← from' if m['direction'] == 'inbound' else '→ to'} {m['from'] if m['direction']=='inbound' else m['to']}"
+                    try:
+                        stdscr.addnstr(preview_start, 2, header_line, w - 3, curses.A_DIM)
+                        subj_line = f"Subject: {m['subject'] or '(no subject)'}"
+                        stdscr.addnstr(preview_start + 1, 2, subj_line, w - 3, curses.A_BOLD)
+                    except curses.error:
+                        pass
+                    # Word-wrap body
+                    wrap_w = w - 5
+                    lines_out = []
+                    for paragraph in m['body'].splitlines():
+                        if not paragraph.strip():
+                            lines_out.append("")
+                            continue
+                        while paragraph and len(lines_out) < preview_h - 2:
+                            if len(paragraph) <= wrap_w:
+                                lines_out.append(paragraph)
+                                break
+                            cut = paragraph[:wrap_w].rfind(' ')
+                            if cut <= 0:
+                                cut = wrap_w
+                            lines_out.append(paragraph[:cut])
+                            paragraph = paragraph[cut:].lstrip()
+                        if len(lines_out) >= preview_h - 2:
+                            break
+                    for j, line in enumerate(lines_out):
+                        if preview_start + 3 + j < h - 1:
+                            try:
+                                stdscr.addnstr(preview_start + 3 + j, 4, line, w - 5)
+                            except curses.error:
+                                pass
+
+            footer = "↑↓ navigate · enter open full · esc back"
+            try:
+                stdscr.addnstr(h - 1, 2, footer, w - 3, curses.A_DIM)
+            except curses.error:
+                pass
+
+            stdscr.refresh()
+            try:
+                key = stdscr.get_wch()
+            except curses.error:
+                need_clear = True
+                continue
+
+            if key == curses.KEY_RESIZE:
+                need_clear = True
+                continue
+            elif key == "\x1b" or key == "\x03":
+                return
+            elif key == curses.KEY_UP:
+                if cursor > 0:
+                    cursor -= 1
+            elif key == curses.KEY_DOWN:
+                if cursor < len(messages) - 1:
+                    cursor += 1
+            elif key == "\n" or key == "\r" or key == curses.KEY_ENTER or key == "o":
+                if cursor < len(messages):
+                    m = messages[cursor]
+                    view_message_in_pager(m)
+                    need_clear = True
+
+    try:
+        curses.wrapper(thread_viewer)
+    except KeyboardInterrupt:
+        pass
+
+def view_message_in_pager(m):
+    """Display a message in $PAGER (or less)."""
+    import subprocess
+    arrow = "← from" if m["direction"] == "inbound" else "→ to"
+    addr = m['from'] if m['direction'] == 'inbound' else m['to']
+    content = (
+        f"Date:    {m['date']}\n"
+        f"{arrow}: {addr}\n"
+        f"Subject: {m['subject'] or '(no subject)'}\n"
+        f"{'-' * 60}\n\n"
+        f"{m['body']}\n"
+    )
+    pager = os.environ.get("PAGER", "less")
+    try:
+        try:
+            curses.endwin()
+        except curses.error:
+            pass
+        subprocess.run([pager], input=content, text=True)
+    except FileNotFoundError:
+        # Fallback: just print it
+        print(content)
+        input("Press enter to continue...")
 
 def cmd_done(args):
     if len(args) > 1:
@@ -2069,7 +2479,8 @@ HELP = {
     "stage":   "crm stage [QUERY] [STAGE]\n  Move a contact to a new pipeline stage. Interactive if args omitted.",
     "next":    "crm next [QUERY] [ACTION] [DATE]\n  Set next action and due date. DATE: YYYY-MM-DD or +Nd (e.g. +7d).",
     "done":    "crm done [QUERY]\n  Mark current action as completed. Logs it as a note and clears the action.",
-    "followup": "crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL]\n  Send a templated email. Opens $EDITOR to review before sending.\n  Templates support: {name} {first_name} {company} {role} {email} {phone}\n  --dry-run shows the email without sending.\n  --to overrides the recipient (for testing).",
+    "followup": "crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL] [--no-context]\n  Send a templated email. Opens $EDITOR to review before sending.\n  Templates support: {name} {first_name} {company} {role} {email} {phone}\n  If IMAP is configured, shows recent exchange as context (disable with --no-context).\n  Warns if the contact replied after your last message.\n  --dry-run shows the email without sending.\n  --to overrides the recipient (for testing).",
+    "thread":   "crm thread [QUERY]\n  Browse recent email thread with a contact via IMAP.\n  Curses viewer: list on top, full message preview below. Requires config.imap.",
     "templates": "crm templates\n  List configured email templates.",
     "edit":    "crm edit [QUERY]\n  Edit a contact using an interactive form.\n\ncrm edit <QUERY> --field value [--field value ...]\n  Edit specific fields non-interactively.\n  Fields: name, email, phone, company, role, source, stage",
     "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add contact --name X [--email X] [--phone X] [--company X] [--role X] [--source X] [--stage X]\n  Add a contact non-interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.\n\ncrm add source <name>\n  Add a new contact source.\n\ncrm add template <name>\n  Add/edit an email template in $EDITOR.",
@@ -2188,6 +2599,7 @@ def main():
         "due": cmd_due,
         "done": cmd_done,
         "followup": cmd_followup,
+        "thread": cmd_thread,
         "templates": cmd_templates,
         "add": cmd_add,
         "edit": cmd_edit,
