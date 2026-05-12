@@ -103,7 +103,7 @@ from pathlib import Path
 
 from . import storage
 from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources
-from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS, ConcurrentWriteError
+from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS, ConcurrentWriteError, _parse_tz
 from .due import parse_date, relative_date, bucket_due
 from .notes import utc_stamp, add_note, edit_note, delete_note
 from .contacts import find_contact, _contact_filter, search_contacts
