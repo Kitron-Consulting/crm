@@ -100,6 +100,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources
+from .due import parse_date, relative_date, bucket_due
 
 # Colors — disabled if not a terminal
 if sys.stdout.isatty():
@@ -884,45 +885,6 @@ def get_contact(data, query=None, prompt="Select contact"):
         return pick_contact_from_matches(data, matches)
     else:
         return pick_contact_from_all(data, prompt)
-
-def parse_date(s, tz=None):
-    if not s:
-        return ""
-    if s.startswith("+") and s.endswith("d"):
-        try:
-            days = int(s[1:-1])
-        except ValueError:
-            print(f"Invalid date: {s}. Use YYYY-MM-DD or +Nd")
-            return None
-        return (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
-    try:
-        datetime.strptime(s, "%Y-%m-%d")
-    except ValueError:
-        print(f"Invalid date: {s}. Use YYYY-MM-DD or +Nd")
-        return None
-    return s
-
-def relative_date(date_str, today_str):
-    """Format a date relative to today."""
-    if not date_str or not today_str:
-        return date_str
-    try:
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        t = datetime.strptime(today_str, "%Y-%m-%d")
-    except ValueError:
-        return date_str
-    diff = (d - t).days
-    if diff < -1:
-        return f"{abs(diff)}d overdue"
-    if diff == -1:
-        return "yesterday"
-    if diff == 0:
-        return "today"
-    if diff == 1:
-        return "tomorrow"
-    if diff <= 14:
-        return f"in {diff}d"
-    return date_str
 
 def format_contact_line(c, stages=None, today=None):
     s = c["stage"]
@@ -2000,18 +1962,8 @@ def cmd_due(args):
     days = int(args[0]) if args else 7
     cutoff = (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
     today = datetime.now(tz).strftime("%Y-%m-%d")
-    due = []
-    overdue = []
-    
-    for c in data["contacts"]:
-        next_date = c.get("next_date", "")
-        if not next_date:
-            continue
-        if next_date < today:
-            overdue.append(c)
-        elif next_date <= cutoff:
-            due.append(c)
-    
+    overdue, due = bucket_due(data["contacts"], today, cutoff)
+
     stages = get_stages(data)
     if overdue:
         print(f"\n{RED}{BOLD}OVERDUE ({len(overdue)}){RESET}")
