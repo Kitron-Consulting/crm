@@ -10,16 +10,18 @@ permissions:
 
 jobs:
   linux:
-    # Build inside manylinux_2_28 so the resulting binary works on any
-    # glibc 2.28+ system (Ubuntu 20.04+, Debian 11+, RHEL 8+, etc).
-    # ubuntu-latest's glibc 2.39 would otherwise lock out older targets.
+    # Build inside python:3.12-bullseye (Debian 11, glibc 2.31) so the
+    # binary runs on Ubuntu 20.04+, Debian 11+, and any system with glibc
+    # >= 2.31. ubuntu-latest's glibc 2.39 would otherwise lock out older
+    # targets, and manylinux's Python is built static-only (no shared
+    # libpython), which PyInstaller needs.
     runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux_2_28_x86_64
+    container: python:3.12-bullseye
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build deps
-        run: /opt/python/cp312-cp312/bin/python -m pip install pyinstaller boto3
+        run: pip install pyinstaller boto3
 
       - name: Generate version file from tag
         run: |
@@ -28,7 +30,7 @@ jobs:
 
       - name: Build binary
         run: |
-          /opt/python/cp312-cp312/bin/python -m PyInstaller --onefile --name crm \
+          pyinstaller --onefile --name crm \
             --collect-all boto3 \
             --collect-all botocore \
             crm_entry.py
