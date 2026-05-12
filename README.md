@@ -26,6 +26,8 @@ chmod +x /usr/local/bin/crm
 
 No Python install needed on the target machine — the binary bundles its own. macOS Gatekeeper will warn the first time; clear with `xattr -d com.apple.quarantine /usr/local/bin/crm`.
 
+Verify the install: `crm --version`
+
 **From source** (Python 3.10+):
 
 ```bash
@@ -63,6 +65,8 @@ crm search TERM            Search across everything
 crm stages                 List stages
 crm templates              List email templates
 crm config [KEY] [VALUE]   Get/set config (e.g., timezone)
+crm where                  Show the active storage backend (file path or s3:// URI)
+crm --version              Print the installed version
 crm help [COMMAND]         Show help for a command
 ```
 
