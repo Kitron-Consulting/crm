@@ -99,6 +99,8 @@ from email.header import decode_header
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources
+
 # Colors — disabled if not a terminal
 if sys.stdout.isatty():
     BOLD = "\033[1m"
@@ -129,8 +131,6 @@ def stage_color(stage, stages):
 # This will move to ~/.config/kitron-crm/ when the local backend is introduced.
 DATA_FILE = Path(os.environ.get("CRM_DATA", Path(__file__).resolve().parent.parent / "crm_data.json"))
 
-DEFAULT_STAGES = ["cold", "contacted", "responded", "meeting", "proposal", "won", "lost", "dormant"]
-DEFAULT_SOURCES = ["cold", "referral", "inbound"]
 CURRENT_VERSION = 4
 
 # --- Migrations ---
@@ -194,12 +194,6 @@ MIGRATIONS = {
     3: migrate_to_3,
     4: migrate_to_4,
 }
-
-def get_stages(data):
-    return data["config"]["stages"]
-
-def get_sources(data):
-    return data["config"]["sources"]
 
 def load_data():
     if DATA_FILE.exists():
