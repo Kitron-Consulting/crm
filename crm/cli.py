@@ -4,6 +4,7 @@ crm — lightweight CLI pipeline tracker
 
 USAGE
   crm [--data FILE] <command> [arguments]
+  crm --version
 
 COMMANDS
   list [STAGE]           List all contacts grouped by stage
@@ -1575,8 +1576,12 @@ def cmd_dashboard(args):
     print()
 
 def main():
-    # Parse --data flag before anything else
     argv = sys.argv[1:]
+    if argv and argv[0] in ("--version", "-V"):
+        from . import __version__
+        print(f"crm {__version__}")
+        return
+    # Parse --data flag before anything else
     if len(argv) >= 2 and argv[0] == "--data":
         storage.use_local_path(argv[1])
         argv = argv[2:]

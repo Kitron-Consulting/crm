@@ -19,6 +19,9 @@ build/
 dist/
 *.spec
 
+# Generated at release-build time from the git tag
+crm/_version.py
+
 # Local S3 creds for smoke testing — never commit
 .s3-creds.env
 

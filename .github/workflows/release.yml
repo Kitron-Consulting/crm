@@ -30,6 +30,11 @@ jobs:
       - name: Install build deps
         run: pip install pyinstaller boto3
 
+      - name: Generate version file from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          printf '__version__ = "%s"\n' "$VERSION" > crm/_version.py
+
       - name: Build binary
         run: |
           pyinstaller --onefile --name crm \
