@@ -98,6 +98,8 @@ import sys
 import os
 import re
 import readline  # enables line editing (arrow keys, history) in input()
+import curses
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -115,6 +117,7 @@ from .display import (
     pick_one, form_edit,
     format_contact_option, format_contact_line,
     pick_contact_from_all, pick_contact_from_matches, get_contact,
+    _init_curses_colors,
 )
 from .mail import (
     get_templates, get_smtp_config,
@@ -537,7 +540,6 @@ def cmd_followup(args):
     # Offer to view recent messages in pager before composing
     if recent_messages and sys.stdin.isatty():
         if prompt_confirm("View recent messages before composing?", default=False):
-            import subprocess
             content = ""
             for m in recent_messages:
                 arrow = "← from" if m["direction"] == "inbound" else "→ to"
@@ -876,7 +878,6 @@ def cmd_thread(args):
 
 def view_message_in_pager(m):
     """Display a message in $PAGER (or less)."""
-    import subprocess
     arrow = "← from" if m["direction"] == "inbound" else "→ to"
     addr = m['from'] if m['direction'] == 'inbound' else m['to']
     content = (
