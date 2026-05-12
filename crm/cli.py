@@ -125,8 +125,9 @@ def stage_color(stage, stages):
         return ""
     return STAGE_COLOR_CYCLE[idx % len(STAGE_COLOR_CYCLE)]
 
-# Data file location — same directory as script
-DATA_FILE = Path(os.environ.get("CRM_DATA", Path(__file__).resolve().parent / "crm_data.json"))
+# Data file location — repo root (one level up from the package).
+# This will move to ~/.config/kitron-crm/ when the local backend is introduced.
+DATA_FILE = Path(os.environ.get("CRM_DATA", Path(__file__).resolve().parent.parent / "crm_data.json"))
 
 DEFAULT_STAGES = ["cold", "contacted", "responded", "meeting", "proposal", "won", "lost", "dormant"]
 DEFAULT_SOURCES = ["cold", "referral", "inbound"]
