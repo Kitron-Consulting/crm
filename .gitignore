@@ -12,6 +12,10 @@ test_setup.sh
 # Python
 __pycache__/
 *.pyc
+.venv/
+
+# Local S3 creds for smoke testing — never commit
+.s3-creds.env
 
 # macOS
 .DS_Store
