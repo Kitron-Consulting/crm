@@ -12,6 +12,18 @@ test_setup.sh
 # Python
 __pycache__/
 *.pyc
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Generated at release-build time from the git tag
+crm/_version.py
+
+# Local S3 creds for smoke testing — never commit
+.s3-creds.env
 
 # macOS
 .DS_Store

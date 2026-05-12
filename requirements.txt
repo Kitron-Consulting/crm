@@ -1,0 +1,6 @@
+# Optional runtime deps. Install with:
+#   pip install -r requirements.txt
+# Only boto3 is required, and only if you use the S3 storage backend
+# (CRM_STORAGE=s3://...). The local backend has no third-party deps.
+
+boto3>=1.34
