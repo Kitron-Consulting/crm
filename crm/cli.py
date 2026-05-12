@@ -58,6 +58,8 @@ COMMANDS
 
   config [KEY] [VALUE]   Get/set config (e.g., timezone)
 
+  where                  Show where the data is stored (active backend)
+
   help [COMMAND]         Show help for a command
 
 EXAMPLES
@@ -81,8 +83,13 @@ STAGES (default, configurable)
   cold · contacted · responded · meeting · proposal · won · lost · dormant
 
 FILES
-  Data stored in crm_data.json (same folder as this script)
-  Override with CRM_DATA environment variable
+  Default: ~/.config/kitron-crm/crm_data.json
+  Override:
+    CRM_STORAGE=/path/to/file.json        local file at that path
+    CRM_STORAGE=s3://bucket/key.json      S3-compatible object storage
+    CRM_DATA=/path/to/file.json           legacy alias for the local path
+    --data PATH                           per-invocation local override
+  Run `crm where` to see the active backend.
 """
 
 import json
@@ -1473,6 +1480,19 @@ HELP = {
     "config":  "crm config\n  Show all config.\n\ncrm config <key>\n  Get a config value.\n\ncrm config <key> <value>\n  Set a config value.\n\n  Available keys: timezone (e.g. UTC+03:00)",
 }
 
+def cmd_where(args):
+    backend = storage.current_backend()
+    print(backend.describe())
+    path = getattr(backend, "path", None)
+    if path is not None:
+        if path.exists():
+            stat = path.stat()
+            size_kb = stat.st_size / 1024
+            mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            print(f"  {size_kb:.1f} KB, modified {mtime}")
+        else:
+            print(f"  {DIM}(not created yet){RESET}")
+
 def cmd_help(args):
     if not args:
         print(__doc__)
@@ -1591,13 +1611,15 @@ def main():
         "stages": cmd_stages,
         "config": cmd_config,
         "cfg": cmd_config,
+        "where": cmd_where,
+        "path": cmd_where,
         "help": cmd_help,
     }
 
     if cmd in commands:
         commands[cmd](args)
         # Show overdue warning (skip for commands that already show it)
-        if cmd not in ("due", "help", "stages", "config", "cfg"):
+        if cmd not in ("due", "help", "stages", "config", "cfg", "where", "path"):
             try:
                 data = load_data()
                 tz = get_tz(data)
