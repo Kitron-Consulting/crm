@@ -17,10 +17,12 @@ from pathlib import Path
 
 from .stages import DEFAULT_STAGES, DEFAULT_SOURCES
 
-# Default points one level above the package (repo root) for compatibility
-# with the pre-refactor script. Will move to ~/.config/kitron-crm/ when the
-# local backend lands.
-DATA_FILE = Path(os.environ.get("CRM_DATA", Path(__file__).resolve().parent.parent / "crm_data.json"))
+# Default data file lives in the user's config dir, not next to the script.
+# The previous __file__-based default broke inside a PyInstaller bundle
+# (the bundled `cli.py` ends up in a temp _MEIPASS dir, not a stable home).
+# Override with CRM_DATA env var or the --data CLI flag.
+DEFAULT_DATA_FILE = Path.home() / ".config" / "kitron-crm" / "crm_data.json"
+DATA_FILE = Path(os.environ.get("CRM_DATA") or DEFAULT_DATA_FILE)
 
 CURRENT_VERSION = 4
 
@@ -123,6 +125,7 @@ def load_data():
 
 
 def save_data(data):
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
