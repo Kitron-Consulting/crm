@@ -14,6 +14,11 @@ __pycache__/
 *.pyc
 .venv/
 
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
 # Local S3 creds for smoke testing — never commit
 .s3-creds.env
 
