@@ -1558,7 +1558,7 @@ def main():
     # Parse --data flag before anything else
     argv = sys.argv[1:]
     if len(argv) >= 2 and argv[0] == "--data":
-        storage.DATA_FILE = Path(argv[1])
+        storage.use_local_path(argv[1])
         argv = argv[2:]
 
     if not argv:

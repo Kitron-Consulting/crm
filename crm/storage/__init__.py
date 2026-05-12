@@ -1,30 +1,65 @@
-"""Data file I/O, schema migrations, and timezone helpers.
+"""Storage layer: backend selection, schema migrations, tz helpers.
 
-`DATA_FILE` is a module-level attribute that callers can reassign (cli's
---data flag does this). load_data/save_data read it at call time.
+Backend is chosen at import time based on CRM_STORAGE:
 
-The timezone helpers live here because get_tz mutates+saves data on
-first run (auto-detects local tz and persists it), which is a storage
-side effect. display_stamp (pure formatting) belongs in display.py and
-imports get_tz from here.
+  unset / "file:..."     → local backend
+  bare path              → local backend at that path
+  "s3://bucket/key.json" → S3 backend  (added in a follow-up commit)
+
+CRM_DATA is still honored as a back-compat shortcut for the local
+backend path when CRM_STORAGE is unset.
+
+cli.py's --data flag calls use_local_path() to switch backends
+mid-process rather than mutating a global.
+
+Migrations and timezone helpers live here (not in a backend) because
+they operate on the loaded data dict, independently of where it came
+from.
 """
 
-import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
-from .stages import DEFAULT_STAGES, DEFAULT_SOURCES
+from ..stages import DEFAULT_STAGES, DEFAULT_SOURCES
+from .errors import ConcurrentWriteError, StorageCorrupt
+from .local import LocalBackend
 
-# Default data file lives in the user's config dir, not next to the script.
-# The previous __file__-based default broke inside a PyInstaller bundle
-# (the bundled `cli.py` ends up in a temp _MEIPASS dir, not a stable home).
-# Override with CRM_DATA env var or the --data CLI flag.
+
 DEFAULT_DATA_FILE = Path.home() / ".config" / "kitron-crm" / "crm_data.json"
-DATA_FILE = Path(os.environ.get("CRM_DATA") or DEFAULT_DATA_FILE)
 
 CURRENT_VERSION = 4
+
+
+def _build_backend():
+    raw = os.environ.get("CRM_STORAGE", "").strip()
+    if raw.startswith("s3://"):
+        raise NotImplementedError(
+            "S3 backend not yet available in this build; "
+            "use CRM_STORAGE=file:... or unset it for now."
+        )
+    if raw.startswith("file:"):
+        return LocalBackend(Path(os.path.expanduser(raw[5:])))
+    if raw:
+        return LocalBackend(Path(os.path.expanduser(raw)))
+    return LocalBackend(Path(os.environ.get("CRM_DATA") or DEFAULT_DATA_FILE))
+
+
+_backend = _build_backend()
+
+
+def use_local_path(path):
+    """Switch the active backend to a local one at the given path.
+    cli's --data flag uses this."""
+    global _backend
+    _backend = LocalBackend(Path(path))
+
+
+def current_backend():
+    """Return the active backend (useful for diagnostics)."""
+    return _backend
 
 
 # --- Migrations ---
@@ -71,8 +106,7 @@ def migrate_to_4(data):
         try:
             dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
             dt = dt.replace(tzinfo=local_tz)
-            utc_dt = dt.astimezone(timezone.utc)
-            return utc_dt.strftime("%Y-%m-%d %H:%M")
+            return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
         except ValueError:
             return stamp
 
@@ -95,22 +129,16 @@ MIGRATIONS = {
 
 
 def load_data():
-    if DATA_FILE.exists():
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                data = {"contacts": []}
-        except (json.JSONDecodeError, ValueError):
-            print(f"Error: {DATA_FILE} is corrupt or unreadable.")
-            print("Fix the file manually or remove it to start fresh.")
-            sys.exit(1)
-    else:
-        data = {"contacts": []}
+    try:
+        data = _backend.load()
+    except StorageCorrupt as e:
+        print(f"Error: {e}")
+        print("Fix the data manually or remove it to start fresh.")
+        sys.exit(1)
 
     version = data.get("version", 0)
     if version > CURRENT_VERSION:
-        print(f"Warning: data file is version {version}, but this crm is version {CURRENT_VERSION}.")
+        print(f"Warning: data is version {version}, but this crm is version {CURRENT_VERSION}.")
         print("Update your crm or you may lose data.")
         sys.exit(1)
     if version < CURRENT_VERSION:
@@ -125,9 +153,7 @@ def load_data():
 
 
 def save_data(data):
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _backend.save(data)
 
 
 def _parse_tz(tz_str):
