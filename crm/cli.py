@@ -104,6 +104,7 @@ from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources
 from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS
 from .due import parse_date, relative_date, bucket_due
 from .notes import utc_stamp, add_note, edit_note, delete_note
+from .contacts import find_contact, _contact_filter, search_contacts
 
 # Colors — disabled if not a terminal
 if sys.stdout.isatty():
@@ -717,15 +718,6 @@ def format_contact_option(c, stages=None):
     sc = stage_color(s, stages or [])
     return f"{BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{role_str}{DIM}){RESET} {sc}[{s.upper()}]{RESET}"
 
-def _contact_filter(c, query):
-    q = query.lower()
-    return (q in c.get("name", "").lower()
-            or q in c.get("company", "").lower()
-            or q in c.get("role", "").lower()
-            or q in c.get("email", "").lower()
-            or q in c.get("stage", "").lower()
-            or q in c.get("source", "").lower())
-
 def pick_contact_from_all(data, prompt="Select contact"):
     """Pick any contact interactively."""
     stages = get_stages(data)
@@ -741,14 +733,6 @@ def pick_contact_from_matches(data, matches):
     stages = get_stages(data)
     fmt = lambda c: format_contact_option(c, stages)
     return pick_one(matches, prompt=f"Multiple matches ({len(matches)})", format_fn=fmt, filter_fn=_contact_filter)
-
-def find_contact(data, query):
-    query = query.lower()
-    matches = []
-    for c in data["contacts"]:
-        if query in c["name"].lower() or query in c["company"].lower() or query in c["email"].lower():
-            matches.append(c)
-    return matches
 
 def get_contact(data, query=None, prompt="Select contact"):
     """Get a contact - by query if provided, or interactive picker."""
@@ -2252,31 +2236,18 @@ def cmd_search(args):
             return
     else:
         term = " ".join(args)
-    
-    term = term.lower()
+
     data = load_data()
-    results = []
-    
-    for c in data["contacts"]:
-        matches = []
-        
-        # Search fields
-        for field in ["name", "company", "email", "phone", "role", "source", "next_action"]:
-            if term in c.get(field, "").lower():
-                matches.append(f"{field}: {c.get(field)}")
-        
-        # Search notes
-        for note in c.get("notes", []):
-            if term in note["text"].lower():
-                matches.append(f"[{display_stamp(note['date'], data)}] {note['text'][:60]}...")
-        
-        if matches:
-            results.append((c, matches))
-    
+    results = search_contacts(
+        data["contacts"],
+        term,
+        stamp_fmt=lambda d: display_stamp(d, data),
+    )
+
     if not results:
-        print(f"No results for '{term}'")
+        print(f"No results for '{term.lower()}'")
         return
-    
+
     stages = get_stages(data)
     print(f"\n{BOLD}Found {len(results)} contact(s):{RESET}\n")
     for c, matches in results:
