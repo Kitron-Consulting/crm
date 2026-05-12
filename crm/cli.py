@@ -103,7 +103,7 @@ from pathlib import Path
 
 from . import storage
 from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources
-from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS
+from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS, ConcurrentWriteError
 from .due import parse_date, relative_date, bucket_due
 from .notes import utc_stamp, add_note, edit_note, delete_note
 from .contacts import find_contact, _contact_filter, search_contacts
@@ -1622,7 +1622,12 @@ def main():
     }
 
     if cmd in commands:
-        commands[cmd](args)
+        try:
+            commands[cmd](args)
+        except ConcurrentWriteError as e:
+            print(f"\n{RED}Error:{RESET} {e}")
+            print("Another device wrote to the same key. Re-run the command to retry.")
+            sys.exit(1)
         # Show overdue warning (skip for commands that already show it)
         if cmd not in ("due", "help", "stages", "config", "cfg", "where", "path"):
             try:

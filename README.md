@@ -200,14 +200,24 @@ Default location: `~/.config/kitron-crm/crm_data.json`. Override with `CRM_DATA`
 export CRM_DATA=~/clients.json
 ```
 
-**Multi-device via S3.** Set `CRM_STORAGE` to an `s3://` URI and put your AWS creds in `~/.aws/credentials` as usual:
+**Multi-device via S3.** Set `CRM_STORAGE` to an `s3://` URI and put your AWS creds in `~/.aws/credentials`:
 
 ```bash
 export CRM_STORAGE=s3://your-bucket/crm_data.json
 export CRM_S3_ENDPOINT=https://your-s3-host    # only for S3-compatible (B2, Hetzner, MinIO, ...)
 ```
 
-The S3 backend uses ETag conditional writes — concurrent edits from a second device produce a clear `data changed remotely` error instead of silently overwriting. Versioning on the bucket gives you free undo history.
+`~/.aws/credentials` format:
+
+```ini
+[default]
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+```
+
+**Bucket setup:** make it private (no public-read ACL), enable server-side encryption (SSE-S3 or KMS), and enable versioning — you get a free undo history for accidental deletes or bad writes.
+
+The S3 backend uses ETag conditional writes — concurrent edits from a second device produce a clear `data changed remotely` error instead of silently overwriting. Re-run the command to retry.
 
 Backups: copy the JSON file, or rely on bucket versioning.
 
