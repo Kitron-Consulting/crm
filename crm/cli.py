@@ -103,6 +103,7 @@ from . import storage
 from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources
 from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS
 from .due import parse_date, relative_date, bucket_due
+from .notes import utc_stamp, add_note, edit_note, delete_note
 
 # Colors — disabled if not a terminal
 if sys.stdout.isatty():
@@ -895,10 +896,7 @@ def cmd_note(args):
             print(f"  {DIM}Cancelled.{RESET}")
             return
 
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-    if "notes" not in c:
-        c["notes"] = []
-    c["notes"].insert(0, {"date": stamp, "text": note_text})
+    add_note(c, note_text)
 
     save_data(data)
     print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
@@ -1082,8 +1080,7 @@ def cmd_notes(args):
         text = edit_text(header=f"Add note to {c['name']}")
         if not text:
             return
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        notes.insert(0, {"date": stamp, "text": text})
+        add_note(c, text)
         save_data(data)
         print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
 
@@ -1091,13 +1088,13 @@ def cmd_notes(args):
         text = edit_text(initial=note["text"], header=f"Edit note from {display_stamp(note['date'], data)}")
         if not text:
             return
-        note["text"] = text
+        edit_note(note, text)
         save_data(data)
         print(f"{GREEN}Updated note{RESET}")
 
     elif action == "delete":
         if prompt_confirm(f"Delete note from {display_stamp(note['date'], data)}?"):
-            notes.remove(note)
+            delete_note(notes, note)
             save_data(data)
             print(f"{YELLOW}Deleted note{RESET}")
 
@@ -1444,7 +1441,7 @@ def cmd_followup(args):
             print(f"{YELLOW}Warning: sent, but couldn't save to IMAP Sent folder: {e}{RESET}")
 
     # Log as note
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    stamp = utc_stamp()
     if "notes" not in c:
         c["notes"] = []
     note_text = f"Sent email: {subject}"
@@ -1731,7 +1728,7 @@ def cmd_done(args):
         print(f"  {DIM}No action set for {c['name']}.{RESET}")
         return
 
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    stamp = utc_stamp()
     if "notes" not in c:
         c["notes"] = []
     c["notes"].insert(0, {"date": stamp, "text": f"Done: {action}"})
@@ -1770,7 +1767,7 @@ def cmd_stage(args):
     old_stage = c["stage"]
     c["stage"] = new_stage
     
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    stamp = utc_stamp()
     if "notes" not in c:
         c["notes"] = []
     c["notes"].insert(0, {"date": stamp, "text": f"Stage: {old_stage} → {new_stage}"})
@@ -1971,7 +1968,7 @@ def cmd_add(args):
             print(f"  {DIM}Cancelled.{RESET}")
             return
 
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    stamp = utc_stamp()
 
     contact = {
         "name": result["Name"],
@@ -2091,7 +2088,7 @@ def cmd_rm(args):
         return
     
     data["contacts"].remove(c)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    stamp = utc_stamp()
     c["removed_at"] = stamp
     data["removed"].append(c)
     save_data(data)
