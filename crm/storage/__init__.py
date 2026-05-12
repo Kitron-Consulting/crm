@@ -36,9 +36,12 @@ CURRENT_VERSION = 4
 def _build_backend():
     raw = os.environ.get("CRM_STORAGE", "").strip()
     if raw.startswith("s3://"):
-        raise NotImplementedError(
-            "S3 backend not yet available in this build; "
-            "use CRM_STORAGE=file:... or unset it for now."
+        from .s3 import S3Backend  # lazy: avoids requiring boto3 for local users
+        parsed = urlparse(raw)
+        return S3Backend(
+            bucket=parsed.netloc,
+            key=parsed.path.lstrip("/"),
+            endpoint_url=os.environ.get("CRM_S3_ENDPOINT") or None,
         )
     if raw.startswith("file:"):
         return LocalBackend(Path(os.path.expanduser(raw[5:])))
