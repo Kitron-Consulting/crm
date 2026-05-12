@@ -10,20 +10,31 @@ Your contacts live in a JSON file. You manage them from the terminal.
 
 ## Install
 
+Download the binary for your OS from the [latest release](https://github.com/Kitron-Consulting/crm/releases/latest):
+
 ```bash
-# Clone and add to PATH
-git clone https://github.com/Kitron-Consulting/crm.git
-cd crm
-chmod +x crm
+# Linux x86_64
+curl -L -o /usr/local/bin/crm \
+  https://github.com/Kitron-Consulting/crm/releases/latest/download/crm-linux-x86_64
+chmod +x /usr/local/bin/crm
 
-# Option A: symlink to somewhere in your PATH
-ln -s $(pwd)/crm ~/.local/bin/crm
-
-# Option B: add to PATH in your shell rc
-echo 'export PATH="$PATH:/path/to/crm"' >> ~/.bashrc
+# macOS (Apple silicon)
+curl -L -o /usr/local/bin/crm \
+  https://github.com/Kitron-Consulting/crm/releases/latest/download/crm-macos-arm64
+chmod +x /usr/local/bin/crm
 ```
 
-Requires Python 3.6+.
+No Python install needed on the target machine — the binary bundles its own. macOS Gatekeeper will warn the first time; clear with `xattr -d com.apple.quarantine /usr/local/bin/crm`.
+
+**From source** (Python 3.10+):
+
+```bash
+git clone https://github.com/Kitron-Consulting/crm.git
+cd crm
+python -m crm
+```
+
+Add `pip install boto3` if you want the S3 storage backend.
 
 ## Usage
 
@@ -179,17 +190,22 @@ The email opens in `$EDITOR` for review. Save = send. Empty = cancel. Sent email
 
 ## Data
 
-Everything lives in `crm_data.json` next to the script. Override the path with `CRM_DATA`:
+Default location: `~/.config/kitron-crm/crm_data.json`. Override with `CRM_DATA`:
 
 ```bash
-export CRM_DATA=~/crm_data.json
-
-# Backup
-cp "$CRM_DATA" ~/backup/
-
-# Sync across machines
-# Just sync the JSON file
+export CRM_DATA=~/clients.json
 ```
+
+**Multi-device via S3.** Set `CRM_STORAGE` to an `s3://` URI and put your AWS creds in `~/.aws/credentials` as usual:
+
+```bash
+export CRM_STORAGE=s3://your-bucket/crm_data.json
+export CRM_S3_ENDPOINT=https://your-s3-host    # only for S3-compatible (B2, Hetzner, MinIO, ...)
+```
+
+The S3 backend uses ETag conditional writes — concurrent edits from a second device produce a clear `data changed remotely` error instead of silently overwriting. Versioning on the bucket gives you free undo history.
+
+Backups: copy the JSON file, or rely on bucket versioning.
 
 ## Scripting
 
