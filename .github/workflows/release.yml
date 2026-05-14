@@ -6,14 +6,10 @@ on:
       - 'v*'
 
 permissions:
-  contents: write  # required to create/update releases
+  contents: write
 
 jobs:
   lint:
-    # Pre-build sanity check: catch dropped-import bugs (F821 = undefined
-    # name) before we waste runner minutes building binaries that will
-    # crash at runtime. F-class only — unused-import noise (F401) is
-    # ignored so historical cruft doesn't block releases.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,36 +24,42 @@ jobs:
 
   linux:
     needs: lint
-    # Build inside python:3.12-bullseye (Debian 11, glibc 2.31) so the
-    # binary runs on Ubuntu 20.04+, Debian 11+, and any system with glibc
-    # >= 2.31. ubuntu-latest's glibc 2.39 would otherwise lock out older
-    # targets, and manylinux's Python is built static-only (no shared
-    # libpython), which PyInstaller needs.
     runs-on: ubuntu-latest
+    # python:3.12-bullseye = Debian 11, glibc 2.31. PyApp's Rust binary
+    # links against the build-host glibc; building here means the binary
+    # runs on any glibc 2.31+ system. python-build-standalone (bundled
+    # by PyApp at runtime) is independently glibc 2.17-compatible.
     container: python:3.12-bullseye
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs reads from git history
 
-      - name: Install build deps
-        run: pip install pyinstaller boto3
-
-      - name: Generate version file from tag
+      - name: Install Rust
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          printf '__version__ = "%s"\n' "$VERSION" > crm/_version.py
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      - name: Build binary
+      - name: Build wheel
         run: |
-          pyinstaller --onefile --name crm \
-            --collect-all boto3 \
-            --collect-all botocore \
-            crm_entry.py
+          pip install build
+          python -m build --wheel
 
-      - name: Rename for release
-        run: mv dist/crm dist/crm-linux-x86_64
+      - name: Build PyApp binary
+        env:
+          PYAPP_PROJECT_NAME: crm
+          PYAPP_EXEC_SPEC: crm.cli:main
+          PYAPP_PYTHON_VERSION: "3.12"
+          PYAPP_DISTRIBUTION_EMBED: "true"
+          PYAPP_FULL_ISOLATION: "true"
+        run: |
+          WHEEL=$(ls dist/crm-*.whl | head -1)
+          export PYAPP_PROJECT_VERSION=$(basename "$WHEEL" | sed -E 's/^crm-(.+)-py3-none-any\.whl$/\1/')
+          export PYAPP_PROJECT_PATH="$PWD/$WHEEL"
+          cargo install pyapp --force --root .pyapp-build
+          mv .pyapp-build/bin/pyapp dist/crm-linux-x86_64
 
-      - name: Attach to release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: dist/crm-linux-x86_64
 
@@ -66,31 +68,34 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
 
-      - name: Install build deps
-        run: pip install pyinstaller boto3
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      - name: Generate version file from tag
+      - name: Build wheel
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          printf '__version__ = "%s"\n' "$VERSION" > crm/_version.py
+          pip install build
+          python -m build --wheel
 
-      - name: Build binary
+      - name: Build PyApp binary
+        env:
+          PYAPP_PROJECT_NAME: crm
+          PYAPP_EXEC_SPEC: crm.cli:main
+          PYAPP_PYTHON_VERSION: "3.12"
+          PYAPP_DISTRIBUTION_EMBED: "true"
+          PYAPP_FULL_ISOLATION: "true"
         run: |
-          pyinstaller --onefile --name crm \
-            --collect-all boto3 \
-            --collect-all botocore \
-            crm_entry.py
+          WHEEL=$(ls dist/crm-*.whl | head -1)
+          export PYAPP_PROJECT_VERSION=$(basename "$WHEEL" | sed -E 's/^crm-(.+)-py3-none-any\.whl$/\1/')
+          export PYAPP_PROJECT_PATH="$PWD/$WHEEL"
+          cargo install pyapp --force --root .pyapp-build
+          mv .pyapp-build/bin/pyapp dist/crm-macos-arm64
 
-      - name: Rename for release
-        run: mv dist/crm dist/crm-macos-arm64
-
-      - name: Attach to release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: dist/crm-macos-arm64

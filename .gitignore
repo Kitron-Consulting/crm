@@ -22,6 +22,9 @@ dist/
 # Generated at release-build time from the git tag
 crm/_version.py
 
+# PyApp scratch build output
+.pyapp-build/
+
 # Local S3 creds for smoke testing — never commit
 .s3-creds.env
 

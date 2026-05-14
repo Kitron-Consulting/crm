@@ -33,10 +33,12 @@ Verify the install: `crm --version`
 ```bash
 git clone https://github.com/Kitron-Consulting/crm.git
 cd crm
+pip install .          # registers `crm` in your PATH (pulls boto3 too)
+# or, run without installing:
 python -m crm
 ```
 
-Add `pip install boto3` if you want the S3 storage backend.
+`pip install --no-deps .` skips `boto3` if you only need the local backend.
 
 ## Usage
 
