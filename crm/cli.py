@@ -61,6 +61,8 @@ COMMANDS
 
   where                  Show where the data is stored (active backend)
 
+  update [--check]       Self-update from the latest GitHub release
+
   help [COMMAND]         Show help for a command
 
 EXAMPLES
@@ -1484,6 +1486,10 @@ HELP = {
     "config":  "crm config\n  Show all config.\n\ncrm config <key>\n  Get a config value.\n\ncrm config <key> <value>\n  Set a config value.\n\n  Available keys: timezone (e.g. UTC+03:00)",
 }
 
+def cmd_update(args):
+    from .update import run
+    run(args)
+
 def cmd_where(args):
     backend = storage.current_backend()
     print(backend.describe())
@@ -1621,6 +1627,7 @@ def main():
         "cfg": cmd_config,
         "where": cmd_where,
         "path": cmd_where,
+        "update": cmd_update,
         "help": cmd_help,
     }
 
@@ -1632,7 +1639,7 @@ def main():
             print("Another device wrote to the same key. Re-run the command to retry.")
             sys.exit(1)
         # Show overdue warning (skip for commands that already show it)
-        if cmd not in ("due", "help", "stages", "config", "cfg", "where", "path"):
+        if cmd not in ("due", "help", "stages", "config", "cfg", "where", "path", "update"):
             try:
                 data = load_data()
                 tz = get_tz(data)
