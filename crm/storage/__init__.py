@@ -50,7 +50,17 @@ def _build_backend():
     return LocalBackend(Path(os.environ.get("CRM_DATA") or DEFAULT_DATA_FILE))
 
 
-_backend = _build_backend()
+_backend = None
+
+
+def _ensure_backend():
+    """Build the backend on first access. Deferred so commands that don't
+    touch storage (--version, help, …) don't pay the boto3 import / S3
+    client init cost when CRM_STORAGE points at s3://."""
+    global _backend
+    if _backend is None:
+        _backend = _build_backend()
+    return _backend
 
 
 def use_local_path(path):
@@ -62,7 +72,7 @@ def use_local_path(path):
 
 def current_backend():
     """Return the active backend (useful for diagnostics)."""
-    return _backend
+    return _ensure_backend()
 
 
 # --- Migrations ---
@@ -133,7 +143,7 @@ MIGRATIONS = {
 
 def load_data():
     try:
-        data = _backend.load()
+        data = _ensure_backend().load()
     except StorageCorrupt as e:
         print(f"Error: {e}")
         print("Fix the data manually or remove it to start fresh.")
@@ -156,7 +166,7 @@ def load_data():
 
 
 def save_data(data):
-    _backend.save(data)
+    _ensure_backend().save(data)
 
 
 def _parse_tz(tz_str):

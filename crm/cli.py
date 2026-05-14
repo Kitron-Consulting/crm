@@ -119,13 +119,9 @@ from .display import (
     pick_contact_from_all, pick_contact_from_matches, get_contact,
     _init_curses_colors,
 )
-from .mail import (
-    get_templates, get_smtp_config,
-    contact_context, render_template,
-    build_message, send_email, save_to_sent,
-    decode_mime_header, extract_body,
-    fetch_thread,
-)
+# Mail symbols are lazy-imported inside the commands that use them
+# (cmd_followup, cmd_thread, cmd_templates) — keeps smtplib/imaplib/
+# email out of the import graph for every non-mail invocation.
 
 def cmd_list(args):
     if len(args) > 1:
@@ -447,6 +443,10 @@ def cmd_notes(args):
             print(f"{YELLOW}Deleted note{RESET}")
 
 def cmd_followup(args):
+    from .mail import (
+        get_templates, get_smtp_config, contact_context, render_template,
+        build_message, send_email, save_to_sent, fetch_thread,
+    )
     # Parse flags
     dry_run = "--dry-run" in args
     no_context = "--no-context" in args
@@ -698,6 +698,7 @@ def cmd_rm_template(args):
     print(f"{YELLOW}Removed template: {BOLD}{name}{RESET}")
 
 def cmd_templates(args):
+    from .mail import get_templates
     data = load_data()
     templates = get_templates(data)
     if not templates:
@@ -708,6 +709,7 @@ def cmd_templates(args):
         print(f"  {BOLD}{name}{RESET} {DIM}—{RESET} {t.get('subject', '')}")
 
 def cmd_thread(args):
+    from .mail import fetch_thread
     if len(args) > 1:
         print("Usage: crm thread [QUERY]")
         return
