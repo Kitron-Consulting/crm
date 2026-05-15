@@ -4,6 +4,8 @@ A lightweight CLI pipeline tracker for solo consultants and freelancers. No depe
 
 Your contacts live in a JSON file. You manage them from the terminal.
 
+Because everything is a CLI command over a plain JSON file, it works naturally with coding agents like Claude Code or Aider — see [Using with coding agents](#using-with-coding-agents).
+
 ![demo](demo.gif)
 
 ![interactive demo](demo_interactive.gif)
@@ -247,6 +249,22 @@ crm --data clients.json list
 crm --data leads.json due
 CRM_DATA=~/leads.json crm due
 ```
+
+## Using with coding agents
+
+Every command is a CLI invocation and every piece of state is a plain JSON file. Coding agents that run shell commands — Claude Code, Aider, Codex CLI, etc. — can drive the whole tool without any special integration.
+
+A few examples of what works:
+
+    claude "add a note to acme that they passed on the proposal and move them to lost"
+
+    claude "who is due for follow-up this week and what was the last thing I said to them?"
+
+    claude "draft a follow-up email to everyone in the proposal stage I haven't contacted in 14 days"
+
+The agent reads `crm help`, figures out the right commands, runs them, and reports back. No MCP server, no plugin, no API key beyond whatever your agent already uses.
+
+The same property makes scripting from shell straightforward (see [Scripting](#scripting)) — agents are just one more consumer of the same interface.
 
 ## Why this exists
 
