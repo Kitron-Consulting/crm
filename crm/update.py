@@ -96,15 +96,32 @@ def _is_newer(latest, current):
 
 
 def _binary_path():
-    """Path of the currently running binary, or None if running from source."""
-    argv0 = sys.argv[0]
-    if not argv0:
-        return None
-    resolved = os.path.realpath(argv0)
+    """Absolute path of the binary to replace, or None if running from source.
+
+    argv[0] is reliable for a plain binary / console-script install, but NOT for
+    a PyApp full-isolation build: PyApp launches the app via `python -c ...`, so
+    sys.argv[0] is "-c" and os.path.realpath() would resolve it to a bogus path
+    in the current directory. Writing there both fails to update the real binary
+    and litters the CWD, while still reporting success. So: trust argv[0] only
+    when it names a real executable file; otherwise locate the launcher on PATH
+    by command name; and if neither works, return None rather than a bad path.
+    """
+    argv0 = sys.argv[0] or ""
+    resolved = os.path.realpath(argv0) if argv0 else ""
     name = os.path.basename(resolved)
+
+    # Running from a source checkout or `python -m crm`: not a swappable binary.
     if name.startswith("python") or name.endswith(".py"):
         return None
-    return resolved
+
+    # Plain binary / console-script install: argv[0] is the real executable.
+    if name and not name.startswith("-") and os.path.isfile(resolved):
+        return resolved
+
+    # PyApp full isolation (argv[0] == "-c") or otherwise unusable argv[0]:
+    # find the launcher on PATH by command name.
+    found = shutil.which("crm")
+    return os.path.realpath(found) if found else None
 
 
 def run(args):
