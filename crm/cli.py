@@ -33,7 +33,10 @@ COMMANDS
                          Send a templated follow-up email
                          Shows recent IMAP exchange as context by default
 
-  thread [QUERY]         Browse recent email thread with a contact
+  thread [QUERY] [--full] [--json]
+                         Browse recent email thread with a contact
+                         Interactive viewer on a TTY; --full prints full
+                         message bodies to stdout; --json emits the messages
 
   templates              List email templates
   
@@ -710,10 +713,63 @@ def cmd_templates(args):
     for name, t in sorted(templates.items()):
         print(f"  {BOLD}{name}{RESET} {DIM}—{RESET} {t.get('subject', '')}")
 
+def _serialize_message(m):
+    """Plain dict for one thread message (no ANSI), JSON-ready."""
+    return {
+        "date": m["date"],
+        "direction": m["direction"],
+        "from": m["from"],
+        "to": m["to"],
+        "subject": m["subject"],
+        "body": m["body"],
+    }
+
+
+def render_thread_plain(messages, contact):
+    """Full-text render of a thread as a returned string (no network).
+
+    `messages` is the list as returned by fetch_thread (newest-first); this
+    renders them chronologically (oldest → newest) so it reads as a
+    conversation. Each message is a header (date, ← inbound / → outbound,
+    from/to address, subject) followed by its full body, with a separator
+    line between messages. Includes ANSI color like the rest of the CLI.
+    """
+    email = contact.get("email", "")
+    name = contact.get("name", "")
+    lines = [f"\n{BOLD}Thread: {name} ({email}) — {len(messages)} messages{RESET}"]
+    for m in reversed(messages):  # fetch_thread returns newest-first
+        arrow = "←" if m["direction"] == "inbound" else "→"
+        dc = CYAN if m["direction"] == "inbound" else GREEN
+        addr_label = "from" if m["direction"] == "inbound" else "to"
+        addr = m["from"] if m["direction"] == "inbound" else m["to"]
+        lines.append(f"\n{DIM}{'─' * 60}{RESET}")
+        lines.append(f"{DIM}[{m['date']}]{RESET} {dc}{arrow}{RESET} {DIM}{addr_label}{RESET} {addr}")
+        lines.append(f"{BOLD}{m['subject'] or '(no subject)'}{RESET}")
+        lines.append("")
+        lines.append(m["body"].rstrip("\n"))
+    return "\n".join(lines)
+
+
+def render_thread_json(messages):
+    """JSON render of a thread as a returned string (no network, no ANSI).
+
+    `messages` is the list as returned by fetch_thread (newest-first); the
+    output is ordered chronologically (oldest → newest). Each item has the
+    fields: date, direction, from, to, subject, body.
+    """
+    ordered = list(reversed(messages))  # fetch_thread returns newest-first
+    return json.dumps(
+        [_serialize_message(m) for m in ordered], ensure_ascii=False, indent=2
+    )
+
+
 def cmd_thread(args):
     from .mail import fetch_thread
+    full = "--full" in args
+    as_json = "--json" in args
+    args = [a for a in args if a not in ("--full", "--json")]
     if len(args) > 1:
-        print("Usage: crm thread [QUERY]")
+        print("Usage: crm thread [QUERY] [--full] [--json]")
         return
     data = load_data()
     imap_cfg = data.get("config", {}).get("imap")
@@ -728,15 +784,31 @@ def cmd_thread(args):
         print(f"{RED}{c['name']} has no email address.{RESET}")
         return
 
-    print(f"{DIM}Fetching messages for {c['email']}...{RESET}")
+    if not as_json:
+        print(f"{DIM}Fetching messages for {c['email']}...{RESET}")
     try:
         messages = fetch_thread(imap_cfg, c["email"])
     except Exception as e:
-        print(f"{RED}IMAP fetch failed: {e}{RESET}")
+        if as_json:
+            print(json.dumps({"error": str(e)}))
+        else:
+            print(f"{RED}IMAP fetch failed: {e}{RESET}")
+        return
+
+    # --json: emit the message list as JSON (chronological, oldest → newest),
+    # no ANSI, for programmatic use. Regardless of TTY.
+    if as_json:
+        print(render_thread_json(messages))
         return
 
     if not messages:
         print(f"  {DIM}No messages found for {c['email']}.{RESET}")
+        return
+
+    # --full: print every message with header + full body, to stdout regardless
+    # of TTY. Chronological (oldest → newest) so it reads as a conversation.
+    if full:
+        print(render_thread_plain(messages, c))
         return
 
     # Non-interactive: print summary
@@ -1475,7 +1547,7 @@ HELP = {
     "next":    "crm next [QUERY] [ACTION] [DATE]\n  Set next action and due date. DATE: YYYY-MM-DD or +Nd (e.g. +7d).",
     "done":    "crm done [QUERY]\n  Mark current action as completed. Logs it as a note and clears the action.",
     "followup": "crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL] [--no-context]\n  Send a templated email. Opens $EDITOR to review before sending.\n  Templates support: {name} {first_name} {company} {role} {email} {phone}\n  If IMAP is configured, shows recent exchange as context (disable with --no-context).\n  Warns if the contact replied after your last message.\n  --dry-run shows the email without sending.\n  --to overrides the recipient (for testing).",
-    "thread":   "crm thread [QUERY]\n  Browse recent email thread with a contact via IMAP.\n  Curses viewer: list on top, full message preview below. Requires config.imap.",
+    "thread":   "crm thread [QUERY] [--full] [--json]\n  Browse recent email thread with a contact via IMAP. Requires config.imap.\n  On a TTY with no flag: curses viewer (list on top, message preview below).\n  Piped with no flag: one-line-per-message summary (date, direction, subject).\n  --full: print every message with headers and full body to stdout\n          (chronological, oldest first), regardless of TTY.\n  --json: emit the messages as JSON (fields: date, direction, from, to,\n          subject, body), oldest first, no ANSI — for scripts/agents.",
     "templates": "crm templates\n  List configured email templates.",
     "edit":    "crm edit [QUERY]\n  Edit a contact using an interactive form.\n\ncrm edit <QUERY> --field value [--field value ...]\n  Edit specific fields non-interactively.\n  Fields: name, email, phone, company, role, source, stage",
     "add":     "crm add contact\n  Add a new contact interactively.\n\ncrm add contact --name X [--email X] [--phone X] [--company X] [--role X] [--source X] [--stage X]\n  Add a contact non-interactively.\n\ncrm add stage <name>\n  Add a new pipeline stage.\n\ncrm add source <name>\n  Add a new contact source.\n\ncrm add template <name>\n  Add/edit an email template in $EDITOR.",

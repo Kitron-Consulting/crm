@@ -54,7 +54,7 @@ crm next [QUERY] [ACTION] [DATE]   Set next action
 crm done [QUERY]           Mark current action as completed
 crm followup [QUERY] [--template NAME] [--dry-run] [--to EMAIL] [--no-context]
                            Send a templated follow-up email
-crm thread [QUERY]         Browse recent email thread with a contact
+crm thread [QUERY] [--full] [--json]   Browse recent email thread with a contact
 crm edit [QUERY] [--field value ...]   Edit contact
 crm add contact [--name X ...]         Add new contact
 crm add stage [NAME]       Add a stage
@@ -243,6 +243,10 @@ crm rm contact acme -y
 # Pipe-friendly — colors and interactive pickers are disabled when not a terminal
 crm due 14 | grep overdue
 crm list > pipeline.txt
+
+# Read a full email thread without the curses viewer (full bodies to stdout)
+crm thread acme --full
+crm thread acme --json | jq '.[].subject'
 
 # Use a different data file (--data flag or CRM_DATA env var)
 crm --data clients.json list
