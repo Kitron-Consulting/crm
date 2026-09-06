@@ -70,6 +70,18 @@ def display_stamp(stamp, data):
 
 # --- $EDITOR + simple input prompts ---
 
+# The cli imports readline to give input() line editing. readline counts every
+# byte of a prompt as visible width unless non-printing runs are bracketed by
+# \001 (start-ignore) .. \002 (end-ignore); without that, ANSI color codes in a
+# prompt are mis-measured and get mangled on redraw — showing a literal "[1m".
+_RL_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _rl_prompt(prompt):
+    """Guard ANSI escapes in a readline input() prompt with \\001..\\002."""
+    return _RL_ANSI_RE.sub(lambda m: "\001" + m.group(0) + "\002", prompt)
+
+
 def edit_text(initial="", header=""):
     """Open $EDITOR for text editing. Returns edited text or None if cancelled.
 
@@ -118,7 +130,7 @@ def prompt_input(label, default="", required=False):
         req = f" {RED}*{RESET}" if required else ""
         display = f"  {BOLD}{label}{RESET}{req}: "
     try:
-        value = input(display).strip()
+        value = input(_rl_prompt(display)).strip()
         if not value and default:
             return default
         if not value and required:
@@ -134,7 +146,7 @@ def prompt_confirm(message, default=False):
     """Styled y/N confirmation prompt."""
     hint = f"{BOLD}y{RESET}/{DIM}N{RESET}" if not default else f"{DIM}y{RESET}/{BOLD}N{RESET}"
     try:
-        answer = input(f"  {message} [{hint}] ").strip().lower()
+        answer = input(_rl_prompt(f"  {message} [{hint}] ")).strip().lower()
         if not answer:
             return default
         return answer == "y"
