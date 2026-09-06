@@ -61,6 +61,7 @@ COMMANDS
   stages                 List stages
 
   config [KEY] [VALUE]   Get/set config (e.g., timezone)
+  config edit            Edit full config as JSON in $EDITOR (nested blocks)
 
   where                  Show where the data is stored (active backend)
 
@@ -1402,6 +1403,9 @@ def cmd_restore(args):
     print(f"{GREEN}Restored {BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{DIM}){RESET}")
 
 def cmd_config(args):
+    if args and args[0] == "edit":
+        return cmd_config_edit(args[1:])
+
     data = load_data()
 
     cfg = data["config"]
@@ -1437,6 +1441,50 @@ def cmd_config(args):
     data["config"] = cfg
     save_data(data)
     print(f"  {key} = {value}")
+
+
+def cmd_config_edit(args):
+    """Edit the whole config block as JSON in $EDITOR.
+
+    Round-trips through load_data/save_data, so it works against any backend
+    (local file or S3) — the only practical way to add nested blocks like the
+    smtp/imap oauth-ms config when the data lives in S3.
+    """
+    data = load_data()
+    cfg = data.get("config", {})
+
+    initial = json.dumps(cfg, indent=2, ensure_ascii=False)
+    header = [
+        "Edit the config block below as JSON, then save and exit.",
+        "It must be a single JSON object. Empty file cancels.",
+    ]
+    while True:
+        edited = edit_text(initial=initial, header=header)
+        if edited is None:
+            print(f"  {DIM}Cancelled — config unchanged.{RESET}")
+            return
+        try:
+            new_cfg = json.loads(edited)
+        except json.JSONDecodeError as e:
+            print(f"{RED}Invalid JSON: {e}{RESET}")
+            if not sys.stdin.isatty() or not prompt_confirm("Re-open editor to fix?", default=True):
+                print(f"  {DIM}Config unchanged.{RESET}")
+                return
+            initial, header = edited, [f"JSON error: {e}", "Fix and save, or empty to cancel."]
+            continue
+        if not isinstance(new_cfg, dict):
+            print(f"{RED}Config must be a JSON object (got {type(new_cfg).__name__}).{RESET}")
+            return
+        break
+
+    if new_cfg == cfg:
+        print(f"  {DIM}No changes.{RESET}")
+        return
+
+    data["config"] = new_cfg
+    save_data(data)
+    print(f"{GREEN}Config updated.{RESET}")
+
 
 def cmd_stages(args):
     data = load_data()
@@ -1557,7 +1605,7 @@ HELP = {
     "restore": "crm restore [QUERY]\n  Restore a previously removed contact.",
     "search":  "crm search <TERM>\n  Search across all contact fields and notes.",
     "stages":  "crm stages\n  List all pipeline stages.",
-    "config":  "crm config\n  Show all config.\n\ncrm config <key>\n  Get a config value.\n\ncrm config <key> <value>\n  Set a config value.\n\n  Available keys: timezone (e.g. UTC+03:00)",
+    "config":  "crm config\n  Show all config.\n\ncrm config <key>\n  Get a config value.\n\ncrm config <key> <value>\n  Set a config value.\n\n  Available keys: timezone (e.g. UTC+03:00)\n\ncrm config edit\n  Edit the whole config as JSON in $EDITOR (for nested blocks like\n  smtp/imap; works against S3-backed data too).",
 }
 
 def cmd_update(args):

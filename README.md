@@ -138,7 +138,16 @@ Timezone is auto-detected on first run. Config is stored in `crm_data.json`.
 
 ## Email templates and follow-ups
 
-Add an SMTP config manually to `crm_data.json`:
+Add an SMTP config to `crm_data.json`. The easiest way — and the only
+convenient one when your data lives in S3 — is `crm config edit`, which opens
+the whole config block as JSON in `$EDITOR` and writes it back through
+whatever backend is active:
+
+```bash
+crm config edit
+```
+
+Or edit the file directly. Either way the config looks like:
 
 ```json
 "config": {
