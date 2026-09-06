@@ -96,16 +96,32 @@ def _is_newer(latest, current):
 
 
 def _binary_path():
-    """Absolute path of the binary to replace, or None if running from source.
+    """Absolute path of the outer binary to replace, or None if unresolvable.
 
-    argv[0] is reliable for a plain binary / console-script install, but NOT for
-    a PyApp full-isolation build: PyApp launches the app via `python -c ...`, so
-    sys.argv[0] is "-c" and os.path.realpath() would resolve it to a bogus path
-    in the current directory. Writing there both fails to update the real binary
-    and litters the CWD, while still reporting success. So: trust argv[0] only
-    when it names a real executable file; otherwise locate the launcher on PATH
-    by command name; and if neither works, return None rather than a bad path.
+    Under PyApp (env var PYAPP set) the app runs as `python -I -c "..."`, so
+    sys.argv[0] is "-c", AND PyApp prepends its unpacked venv bin dir to PATH.
+    That combination poisons the naive lookups: os.path.realpath("-c") is a
+    bogus CWD path, and shutil.which("crm") resolves to the *inner* console
+    script inside the unpacked cache (…/python/bin/crm) rather than the real
+    launcher. Overwriting the inner script reports success but leaves the
+    actual binary stale — the exact "update does nothing" symptom.
+
+    So under PyApp we scan PATH for the launcher while skipping the running
+    interpreter's own bin dir (where the inner script lives). Outside PyApp,
+    the original argv[0] / which() logic is correct and left unchanged.
     """
+    if os.environ.get("PYAPP"):
+        # The inner console script sits next to sys.executable; skip that dir
+        # so we find the outer launcher (e.g. /usr/local/bin/crm) instead.
+        inner_bindir = os.path.dirname(os.path.realpath(sys.executable)) if sys.executable else ""
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not entry or os.path.realpath(entry) == inner_bindir:
+                continue
+            cand = os.path.join(entry, "crm")
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return os.path.realpath(cand)
+        return None
+
     argv0 = sys.argv[0] or ""
     resolved = os.path.realpath(argv0) if argv0 else ""
     name = os.path.basename(resolved)
@@ -118,8 +134,7 @@ def _binary_path():
     if name and not name.startswith("-") and os.path.isfile(resolved):
         return resolved
 
-    # PyApp full isolation (argv[0] == "-c") or otherwise unusable argv[0]:
-    # find the launcher on PATH by command name.
+    # Unusable argv[0]: locate the launcher on PATH by command name.
     found = shutil.which("crm")
     return os.path.realpath(found) if found else None
 
