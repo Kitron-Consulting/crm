@@ -52,6 +52,9 @@ jobs:
           PYAPP_PYTHON_VERSION: "3.12"
           PYAPP_DISTRIBUTION_EMBED: "true"
           PYAPP_FULL_ISOLATION: "true"
+          # Bundle the ms365 extra (msal) so Microsoft 365 OAuth works in the
+          # binary — a full-isolation PyApp env can't be pip-extended later.
+          PYAPP_PROJECT_FEATURES: ms365
         run: |
           WHEEL=$(ls dist/crm-*.whl | head -1)
           export PYAPP_PROJECT_VERSION=$(basename "$WHEEL" | sed -E 's/^crm-(.+)-py3-none-any\.whl$/\1/')
@@ -89,6 +92,9 @@ jobs:
           PYAPP_PYTHON_VERSION: "3.12"
           PYAPP_DISTRIBUTION_EMBED: "true"
           PYAPP_FULL_ISOLATION: "true"
+          # Bundle the ms365 extra (msal) so Microsoft 365 OAuth works in the
+          # binary — a full-isolation PyApp env can't be pip-extended later.
+          PYAPP_PROJECT_FEATURES: ms365
         run: |
           WHEEL=$(ls dist/crm-*.whl | head -1)
           export PYAPP_PROJECT_VERSION=$(basename "$WHEEL" | sed -E 's/^crm-(.+)-py3-none-any\.whl$/\1/')

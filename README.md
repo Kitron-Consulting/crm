@@ -165,7 +165,65 @@ The `imap` block is optional — if set:
 - `crm followup` shows recent exchange as context and warns if the contact replied after your last message
 - `crm thread <query>` lets you browse full email history with a contact
 
-Most providers don't auto-save SMTP-sent emails (Gmail does, Fastmail/Office365/custom domains usually don't).
+Most providers don't auto-save SMTP-sent emails (Gmail and Exchange Online /
+Microsoft 365 do; Fastmail/custom domains usually don't). When the sending
+account auto-saves, `crm` skips the IMAP append so you don't get a duplicate
+in Sent.
+
+### Microsoft 365 / Exchange Online (OAuth)
+
+Microsoft has disabled IMAP basic auth on Exchange Online and is phasing out
+SMTP basic auth, so password login no longer works there. Use OAuth 2.0
+(XOAUTH2) instead by setting `"auth": "oauth-ms"` on the `smtp` and/or `imap`
+blocks — no password is stored:
+
+```json
+"config": {
+  "smtp": {
+    "auth": "oauth-ms",
+    "host": "smtp.office365.com",
+    "port": 587,
+    "user": "you@yourtenant.com",
+    "client_id": "<entra-app-client-id>",
+    "tenant_id": "<entra-tenant-id>",
+    "from_name": "Your Name"
+  },
+  "imap": {
+    "auth": "oauth-ms",
+    "host": "outlook.office365.com",
+    "port": 993,
+    "user": "you@yourtenant.com",
+    "client_id": "<entra-app-client-id>",
+    "tenant_id": "<entra-tenant-id>",
+    "sent_folder": "Sent Items",
+    "inbox_folder": "INBOX"
+  }
+}
+```
+
+`client_id` and `tenant_id` are non-secret; `smtp` and `imap` normally share
+the same pair. Install the optional dependency:
+
+```bash
+pip install "crm[ms365]"   # pulls in msal
+```
+
+**One-time prerequisites** (an admin registers an app in Microsoft Entra ID):
+
+- A **public client** app registration (public/native client flows enabled).
+- Delegated permissions on the *Office 365 Exchange Online* API:
+  `IMAP.AccessAsUser.All` and `SMTP.Send`, plus `offline_access` — all
+  **admin-consented**.
+- SMTP AUTH enabled for the mailbox.
+
+The **first** mail command (`crm followup`, `crm thread`) prints a
+`https://microsoft.com/devicelogin` URL and a code to stderr for a one-time
+device login. After that the token is cached and refreshed silently — no more
+prompts. Run that first command interactively; non-interactive runs (cron,
+pipes) with no cached token fail fast with instructions rather than hanging.
+
+Exchange Online auto-saves SMTP-submitted mail to **Sent Items**, so `crm`
+does not append a second copy over IMAP for `oauth-ms` accounts.
 
 Create a template (opens `$EDITOR`):
 
@@ -195,7 +253,12 @@ crm followup acme --to you@example.com     # override recipient (testing)
 
 The email opens in `$EDITOR` for review. Save = send. Empty = cancel. Sent emails are logged as notes.
 
-**Security note:** SMTP password is stored plaintext in `crm_data.json`. Keep that file private (`chmod 600`).
+**Security note:** For password auth, the SMTP/IMAP password is stored
+plaintext in `crm_data.json` — keep that file private (`chmod 600`). For
+`oauth-ms`, **no password is stored**; instead MSAL keeps a refresh-token
+cache at `~/.config/kitron-crm/msal_cache.json`. That file is a bearer
+credential — `crm` writes it `chmod 600`. Do not commit it or sync it (it
+lives outside `crm_data.json` precisely so it never rides along to S3).
 
 ## Data
 

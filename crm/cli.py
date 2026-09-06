@@ -624,9 +624,11 @@ def cmd_followup(args):
         print(f"{RED}Send failed: {e}{RESET}")
         return
 
-    # Save to IMAP Sent folder if configured
+    # Save to IMAP Sent folder if configured. Exchange Online (oauth-ms)
+    # auto-saves SMTP-submitted mail to Sent Items, so appending again would
+    # create a duplicate — skip it for that path.
     imap_cfg = data.get("config", {}).get("imap")
-    if imap_cfg:
+    if imap_cfg and imap_cfg.get("auth") != "oauth-ms":
         try:
             save_to_sent(imap_cfg, msg)
         except Exception as e:

@@ -12,6 +12,7 @@ network I/O. The cli layer decides when to call them; this module
 doesn't print or sys.exit.
 """
 
+import base64
 import email as emaillib
 import imaplib
 import re
@@ -20,6 +21,10 @@ from datetime import datetime, timezone
 from email.header import decode_header
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr, parsedate_to_datetime
+
+
+class MailAuthError(Exception):
+    """Raised when SMTP/IMAP authentication fails (password or OAuth)."""
 
 
 def get_templates(data):
@@ -65,26 +70,81 @@ def build_message(smtp_cfg, to_addr, subject, body):
     return msg
 
 
+def _smtp_authenticate(s, cfg):
+    """Authenticate an open SMTP session per cfg["auth"].
+
+    password (or absent) → basic login (unchanged path).
+    oauth-ms            → XOAUTH2 with a Microsoft 365 bearer token. SMTP
+                          requires the SASL string base64-encoded manually.
+    """
+    if cfg.get("auth") == "oauth-ms":
+        from . import msauth
+        token = msauth.get_token(cfg)
+        auth_string = msauth.build_xoauth2_string(cfg["user"], token)
+        encoded = base64.b64encode(auth_string.encode()).decode()
+        # starttls() reset smtplib's EHLO state; the raw AUTH docmd() below
+        # would otherwise be rejected with 503 "Send hello first". login()
+        # re-EHLOs for us on the password path, but we bypass it here.
+        s.ehlo()
+        code, resp = s.docmd("AUTH", "XOAUTH2 " + encoded)
+        if code != 235:
+            detail = resp.decode(errors="replace") if isinstance(resp, bytes) else str(resp)
+            hint = ""
+            if code == 535:  # 5.7.3 Authentication unsuccessful
+                hint = (
+                    "\nCheck that the app's delegated SMTP.Send permission was "
+                    "admin-consented and that SMTP AUTH is enabled for the mailbox."
+                )
+            raise MailAuthError(f"SMTP OAuth login failed: {code} {detail}{hint}")
+    else:
+        s.login(cfg["user"], cfg["password"])
+
+
+def _imap_authenticate(m, cfg):
+    """Authenticate an open IMAP session per cfg["auth"].
+
+    oauth-ms uses imaplib's authenticate(), which base64-encodes the
+    authobject's return value internally — so it returns the RAW SASL bytes,
+    unlike the SMTP path which pre-encodes.
+    """
+    if cfg.get("auth") == "oauth-ms":
+        from . import msauth
+        token = msauth.get_token(cfg)
+        auth_string = msauth.build_xoauth2_string(cfg["user"], token)
+        try:
+            m.authenticate("XOAUTH2", lambda _: auth_string.encode())
+        except imaplib.IMAP4.error as e:
+            raise MailAuthError(
+                "IMAP OAuth authentication failed. Check that the app's "
+                "delegated IMAP.AccessAsUser.All permission was admin-consented "
+                f"and that IMAP is enabled for the mailbox. ({e})"
+            )
+    else:
+        m.login(cfg["user"], cfg["password"])
+
+
 def send_email(smtp_cfg, msg):
     """Send an EmailMessage via SMTP. Raises exception on failure."""
     host = smtp_cfg["host"]
     port = smtp_cfg.get("port", 587)
     with smtplib.SMTP(host, port, timeout=30) as s:
         s.starttls()
-        s.login(smtp_cfg["user"], smtp_cfg["password"])
+        _smtp_authenticate(s, smtp_cfg)
         s.send_message(msg)
 
 
 def save_to_sent(imap_cfg, msg):
-    """Append a sent message to the IMAP Sent folder."""
+    """Append a sent message to the IMAP Sent folder.
+
+    Note: Exchange Online (auth: "oauth-ms") auto-saves SMTP-submitted mail to
+    Sent Items, so the caller skips this for that path to avoid a duplicate.
+    """
     host = imap_cfg["host"]
     port = imap_cfg.get("port", 993)
-    user = imap_cfg["user"]
-    password = imap_cfg["password"]
     folder = imap_cfg.get("sent_folder", "Sent")
 
     with imaplib.IMAP4_SSL(host, port) as m:
-        m.login(user, password)
+        _imap_authenticate(m, imap_cfg)
         # \Seen flag so it doesn't show as unread
         m.append(folder, "\\Seen", imaplib.Time2Internaldate(datetime.now().timestamp()), msg.as_bytes())
 
@@ -177,14 +237,12 @@ def fetch_thread(imap_cfg, contact_email):
     """Fetch recent messages between the user and a contact. Returns sorted list."""
     host = imap_cfg["host"]
     port = imap_cfg.get("port", 993)
-    user = imap_cfg["user"]
-    password = imap_cfg["password"]
     inbox = imap_cfg.get("inbox_folder", "INBOX")
     sent = imap_cfg.get("sent_folder", "Sent")
 
     messages = []
     with imaplib.IMAP4_SSL(host, port) as m:
-        m.login(user, password)
+        _imap_authenticate(m, imap_cfg)
         messages.extend(_fetch_folder(m, inbox, contact_email, "inbound"))
         messages.extend(_fetch_folder(m, sent, contact_email, "outbound"))
 
