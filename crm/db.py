@@ -34,25 +34,20 @@ SCHEMA_VERSION = 2
 CONTACT_COLUMNS = ("name", "email", "phone", "company", "role", "source",
                    "stage", "next_action", "next_date")
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
+# --- Schema migrations ------------------------------------------------------
+# Ordered, run-once steps keyed by target version — the SQLite analogue of the
+# legacy JSON MIGRATIONS. init_schema() creates `meta`, reads the stored
+# schema_version, and applies every migration above it in sequence. A fresh db
+# runs them all (1..SCHEMA_VERSION); an older db runs only the new ones. Add a
+# schema change by appending an entry and bumping SCHEMA_VERSION — never edit a
+# shipped migration (that would diverge fresh dbs from upgraded ones).
+
+# v1 — baseline: config, contacts, notes, stage_history, meetings.
+_MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL          -- JSON-encoded value
 );
--- The organisation a contact belongs to. `name` mirrors contacts.company (kept
--- in sync both ways); domain/notes make it a first-class, annotatable record.
-CREATE TABLE IF NOT EXISTS accounts (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL DEFAULT '',
-    domain     TEXT NOT NULL DEFAULT '',
-    notes      TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT ''
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_name ON accounts(name COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS contacts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL DEFAULT '',
@@ -64,12 +59,10 @@ CREATE TABLE IF NOT EXISTS contacts (
     stage       TEXT NOT NULL DEFAULT '',
     next_action TEXT NOT NULL DEFAULT '',
     next_date   TEXT NOT NULL DEFAULT '',
-    account_id  INTEGER,         -- -> accounts.id (resolved from company name)
     removed_at  TEXT,            -- NULL = active; set = soft-deleted
     created_seq INTEGER          -- import/restore order tiebreaker
 );
 CREATE INDEX IF NOT EXISTS idx_contacts_active ON contacts(removed_at);
-CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id);
 CREATE TABLE IF NOT EXISTS notes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
@@ -108,6 +101,35 @@ CREATE INDEX IF NOT EXISTS idx_meetings_contact ON meetings(contact_id);
 CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start);
 """
 
+# v2 — accounts entity + contacts.account_id.
+_MIGRATION_2_SQL = """
+-- The organisation a contact belongs to. `name` mirrors contacts.company (kept
+-- in sync both ways); domain/notes make it a first-class, annotatable record.
+CREATE TABLE IF NOT EXISTS accounts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL DEFAULT '',
+    domain     TEXT NOT NULL DEFAULT '',
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_name ON accounts(name COLLATE NOCASE);
+"""
+
+
+def _migrate_1(conn):
+    conn.executescript(_MIGRATION_1)
+
+
+def _migrate_2(conn):
+    conn.executescript(_MIGRATION_2_SQL)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(contacts)")}
+    if "account_id" not in cols:  # guard: ALTER has no IF NOT EXISTS
+        conn.execute("ALTER TABLE contacts ADD COLUMN account_id INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id)")
+
+
+_SCHEMA_MIGRATIONS = {1: _migrate_1, 2: _migrate_2}
+
 
 def _row_contact(row):
     """sqlite3.Row -> contact dict (without the joined children)."""
@@ -143,15 +165,18 @@ class Db:
         return db
 
     def init_schema(self):
-        self.conn.executescript(_DDL)
-        # Additive column upgrades for dbs created under an older schema version.
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(contacts)")}
-        if "account_id" not in cols:
-            self.conn.execute("ALTER TABLE contacts ADD COLUMN account_id INTEGER")
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id)")
+        """Bring the db up to SCHEMA_VERSION by applying each pending migration
+        once, in order, then record the new version. Idempotent + safe on a db
+        that's already current (no migrations run)."""
         self.conn.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),))
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        row = self.conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        current = int(row["value"]) if row and str(row["value"]).isdigit() else 0
+        for v in range(current + 1, SCHEMA_VERSION + 1):
+            _SCHEMA_MIGRATIONS[v](self.conn)
+            self.conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(v),))
         self.conn.commit()
 
     def close(self):
