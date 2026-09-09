@@ -103,7 +103,7 @@ select.ctl { padding-right:28px; cursor:pointer; }
 .count-badge.warn { background:var(--warn-soft); color:var(--warn); }
 
 /* ---------- shell ---------- */
-.app { display:grid; grid-template-columns:var(--sidebar) minmax(0,1fr); min-height:100vh; }
+.app { display:grid; grid-template-columns:var(--sidebar) minmax(0,1fr); height:100vh; }
 .sidebar { position:sticky; top:0; height:100vh; border-right:1px solid var(--line); background:var(--surface);
            display:flex; flex-direction:column; padding:14px 12px; gap:2px; }
 .brand { display:flex; align-items:center; gap:10px; padding:4px 8px 18px; font-weight:600; }
@@ -123,7 +123,7 @@ select.ctl { padding-right:28px; cursor:pointer; }
 .nav-btn .badge:empty { display:none; }
 .sidebar-foot { margin-top:auto; font-size:12px; color:var(--muted); padding:8px; line-height:2; }
 .sidebar-foot div { display:flex; justify-content:space-between; gap:8px; }
-.main { min-width:0; display:flex; flex-direction:column; }
+.main { min-width:0; min-height:0; height:100vh; display:flex; flex-direction:column; }
 .topbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:12px; height:56px; padding:0 24px;
           background:var(--topbar-bg); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
           border-bottom:1px solid var(--line); }
@@ -134,7 +134,12 @@ select.ctl { padding-right:28px; cursor:pointer; }
 .search .clear { position:absolute; right:4px; top:50%; transform:translateY(-50%); }
 .search:focus-within .kbd-hint { display:none; }
 input[type=search]::-webkit-search-cancel-button { -webkit-appearance:none; appearance:none; }
-main { padding:24px; flex:1; min-width:0; }
+/* The shell is locked to the viewport (.app/.main are 100vh); <main> is the one
+   vertical scroll container for every view, so the page body never scrolls and
+   there's never a second scrollbar. Sticky sub-headers (table <th>, .tl-axis)
+   pin to the top of this scrollport, just under the topbar. The board overrides
+   this below (.main.fill main { overflow:hidden }) to scroll its columns instead. */
+main { padding:24px; flex:1; min-width:0; min-height:0; overflow:auto; display:flex; flex-direction:column; }
 .view-head { display:flex; align-items:flex-end; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
 .view-head h1 { font-size:20px; margin:0; }
 .view-head .sub { font-size:13px; color:var(--muted); margin-top:2px; }
@@ -183,8 +188,11 @@ main { padding:24px; flex:1; min-width:0; }
 body.dragging-any .card { transition:none; }
 
 /* ---------- table ---------- */
-.table-wrap { border:1px solid var(--line); border-radius:var(--r-lg); background:var(--surface); overflow:auto;
-              max-height:calc(100vh - 230px); }
+/* Sizes to content, but shrinks + scrolls internally when the list outgrows the
+   viewport — so the page never gains a second scrollbar and the sticky <th> pins
+   to the (padding-less) card top, not under the topbar's padding. */
+.table-wrap { border:1px solid var(--line); border-radius:var(--r-lg); background:var(--surface);
+              flex:0 1 auto; min-height:0; overflow:auto; }
 table { width:100%; border-collapse:separate; border-spacing:0; font-size:13px; }
 th { position:sticky; top:0; z-index:1; background:var(--surface); text-align:left; font-size:12px; font-weight:500;
      color:var(--muted); padding:0 12px; height:38px; border-bottom:1px solid var(--line); white-space:nowrap; user-select:none; }
@@ -541,7 +549,8 @@ label.f .ctl { width:100%; }
 .seg-btns .btn { border-radius:0; margin-left:-1px; }
 .seg-btns .btn:first-child { border-radius:var(--r) 0 0 var(--r); margin-left:0; }
 .seg-btns .btn:last-child { border-radius:0 var(--r) var(--r) 0; }
-.tl { border:1px solid var(--line); border-radius:var(--r-lg); background:var(--surface); overflow:hidden; }
+.tl { border:1px solid var(--line); border-radius:var(--r-lg); background:var(--surface);
+      flex:0 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 .tl-axis { position:sticky; top:0; z-index:2; background:var(--surface); border-bottom:1px solid var(--line); display:flex; }
 .tl-label { flex:0 0 220px; min-width:0; padding:8px 12px; border-right:1px solid var(--line); display:flex; flex-direction:column; justify-content:center; }
 .tl-track { position:relative; flex:1; min-width:0; height:44px; }
@@ -549,7 +558,7 @@ label.f .ctl { width:100%; }
 .tl-tick { position:absolute; top:8px; font-size:11px; color:var(--muted); transform:translateX(2px); white-space:nowrap; font-variant-numeric:tabular-nums; }
 .tl-tick::before { content:""; position:absolute; left:-2px; top:-8px; bottom:-8px; width:1px; background:var(--line); }
 .tl-today { position:absolute; top:0; bottom:0; width:2px; background:var(--accent); opacity:.7; z-index:1; }
-.tl-rows { max-height:calc(100vh - 260px); overflow:auto; }
+.tl-rows { flex:1 1 auto; min-height:0; min-width:0; overflow:auto; }
 .tl-row { display:flex; cursor:pointer; border-bottom:1px solid var(--line); }
 .tl-row:last-child { border-bottom:0; }
 .tl-row:hover { background:var(--surface-2); }
@@ -560,4 +569,26 @@ label.f .ctl { width:100%; }
 .tl-bar.ongoing { box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--stage) 55%, transparent); }
 .tl-bar-txt { font-size:11px; color:var(--stage-fg); padding:0 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .tl-stuck { position:absolute; top:14px; right:6px; z-index:1; font-size:11px; font-weight:600; color:var(--danger); background:var(--danger-soft); border-radius:4px; padding:1px 5px; }
+.tl-bar { cursor:pointer; transition:filter .1s, border-color .1s; }
+.tl-bar:hover { filter:brightness(1.05); border-color:color-mix(in srgb, var(--stage) 70%, transparent); z-index:1; }
+.tl-week { position:absolute; top:0; bottom:0; width:1px; background:var(--line); opacity:.55; pointer-events:none; }
+/* per-stage occupancy summary */
+.tl-summary { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 12px; }
+.tl-sumchip { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px;
+              background:var(--stage-bg); border:1px solid color-mix(in srgb, var(--stage) 40%, transparent); font-size:12px; }
+.tl-sumdot { width:8px; height:8px; border-radius:50%; background:var(--stage); flex:none; }
+.tl-sumname { color:var(--stage-fg); font-weight:600; }
+.tl-sumn { font-weight:700; color:var(--stage-fg); font-variant-numeric:tabular-nums; }
+.tl-summed { color:var(--muted); font-variant-numeric:tabular-nums; }
+/* pointer-following hover card */
+.tl-card { position:fixed; z-index:60; width:240px; transform:translateY(-50%); pointer-events:none;
+           background:var(--surface); border:1px solid var(--line-2); border-radius:var(--r); box-shadow:var(--sh-2); padding:9px 11px; }
+.tl-card-head { display:flex; align-items:center; gap:6px; }
+.tl-card-stage { font-weight:700; font-size:13px; color:var(--ink); }
+.tl-card-tag { margin-left:auto; font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+               background:var(--surface-2); border-radius:4px; padding:1px 5px; }
+.tl-card-sub { color:var(--muted); font-size:12px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tl-card-range { margin-top:6px; font-size:12px; color:var(--ink-2); font-variant-numeric:tabular-nums; }
+.tl-card-dur { font-size:12px; color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+.tl-card-stuck { margin-top:5px; font-size:11px; font-weight:600; color:var(--danger); background:var(--danger-soft); border-radius:4px; padding:2px 6px; display:inline-block; }
 @media (max-width:700px){ .tl-label{ flex-basis:140px; } }

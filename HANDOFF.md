@@ -35,29 +35,42 @@ triage). CI: release workflow builds the bundle before the wheel.
 
 Tests: `.venv/bin/python -m pytest -q` → 134 passing. `uvx ruff check --select F821 crm` clean.
 
-## ⚠️ Timeline view is a FIRST CUT — finish it
+## Timeline view — polished & verified
 The backend is complete and tested (`stage_segments`/`stage_history` in
 `crm/stages.py`, exposed as `segments`/`stage_history` on `/api/state`). The
-frontend (`web/src/views/Timeline.svelte`) was written by hand during this
-handoff because the sub-agent that was building it hit a model rate limit
-mid-task. It renders (rows, stage bars, today line, month ticks, range 1M–All,
-sort, click→drawer, stuck badge) and builds clean, but it's minimal. **Polish
-remaining** (see the original spec I gave the agent):
-- richer hover card instead of native `title` tooltips
-- week gridlines at short ranges; nicer axis
-- per-stage duration summary; verify sort options feel right
-- the sub-agent's own Playwright suite for it was never written — add assertions
-  (mirror `scratchpad/pw/calendar.js` / `timeline.js`)
+frontend (`web/src/views/Timeline.svelte`) now has the full polish pass:
+- **rich pointer-following hover card** (`.tl-card`) replacing native `title`
+  on bars — stage, current/past tag, contact subline, date range, duration
+  (days + weeks), and a "stuck ≥30d" flag; clears on pointer-leave.
+- **week (Monday) gridlines** at the 1M and 3M ranges only (`weekLines`); hidden
+  at 6M/12M/All where they'd be noise.
+- **per-stage duration summary** strip (`.tl-summary`): one tinted chip per
+  stage with current occupancy count and median days-in-stage, in config order.
+- sort options reviewed (longest / recently moved / name / stage order) — all fine.
 
-Everything else in the app has agent-run Playwright verification; Timeline has
-only the quick smoke I ran (18 rows, 20 bars, today line, click opens drawer, 0
-console errors, light+dark screenshots in the session scratchpad).
+Verified with a real Playwright suite: `scratchpad/pw/timeline.js` (19 assertions,
+0 console errors, light+dark screenshots). See "Running the Timeline suite" below.
+Builds clean (no a11y warnings) and `pytest` still 134 green.
+
+## App-shell scroll fix (all views)
+Fixed a double-scrollbar / vertical-overflow bug that hit most views. The shell
+is now locked to the viewport (`.app`/`.main` are `height:100vh`) and `<main>` is
+the single scroll container (`display:flex; flex-direction:column; overflow:auto`),
+so the page body never scrolls and there's never a second scrollbar. The old inner
+scrollers used guessed caps (`.table-wrap max-height:calc(100vh-230px)`, `.tl-rows`
+`…-260px`) that didn't match real chrome height and leaked ~13–58px of body scroll;
+they're now `flex:0 1 auto; min-height:0; overflow:auto` (size to content, shrink +
+scroll internally when they outgrow the viewport). Their sticky headers (`th`,
+`.tl-axis`) pin to the padding-less card top, not under the topbar's padding.
+Board keeps its own `.main.fill main { overflow:hidden }` column-scroll. Verified 0
+body/horizontal overflow and 0 nested scrollers across board/contacts/due/import/
+calendar/timeline at viewport heights 640/760/900.
 
 ## TODO / not done
 - **Restart `crm serve`** after pulling: the IMAP timeouts, the no-device-flow-
   in-server guard, outbound-invite parsing, and thread time-correlation are
   Python and need a restart (a running server predating them won't have them).
-- **Finish Timeline** (above).
+- ~~Finish Timeline~~ — done (see above).
 - **"Next meeting" line on contact cards** — deferred; needs thread events per
   contact, which today only exist once a thread is opened.
 - **Release**: this is a big v1.9.0 candidate. Nothing has been tested against
@@ -66,6 +79,26 @@ console errors, light+dark screenshots in the session scratchpad).
   to `main` + tag `v1.9.0` (CI builds the UI into the wheel/binary).
 - **kitron repo**: `letter-generator.py` output-clobbering + overflow fixes are
   still uncommitted there (separate repo).
+
+## Running the Timeline suite (`scratchpad/pw/timeline.js`)
+```bash
+.venv/bin/python scratchpad/make_seed.py            # regenerate scratchpad/seed_ui.json (18 contacts)
+cd web && npm run build && cd ..                     # bundle the current UI
+.venv/bin/python -m crm --data scratchpad/seed_ui.json serve --port 8790 --no-browser
+# ...copy the ?t=<token> it prints, then in another shell:
+cd scratchpad/pw && npm i playwright                 # once
+CHROME_BIN=~/.cache/ms-playwright/cft-1243/chrome-linux64/chrome \
+  node timeline.js "http://127.0.0.1:8790/?t=<token>"
+```
+Heads-up: `npx playwright install chromium` **fails on this network** — the
+Playwright CDN mishandles its own 307 redirect and times out at 30s. Workaround
+used here: `curl -sSL <cft-zip-url> -o /tmp/cft.zip` (curl follows the redirect
+fine, ~17s), unzip, and point the suite at the binary via `CHROME_BIN`. The
+Chrome-for-Testing build already sits at `~/.cache/ms-playwright/cft-1243/`.
+`scratchpad/` is treated as disposable (holds node_modules + the browser + PNGs,
+so it's *not* committed) — `make_seed.py` and `pw/timeline.js` live there and
+won't transfer to the laptop. Recreate them from the steps above, or move the two
+source files into the repo (e.g. `web/e2e/`) if you want them tracked for CI.
 
 ## Gotchas / conventions
 - Package installs via **uv**, never bare pip (`uv pip install --python .venv/bin/python ...`).
