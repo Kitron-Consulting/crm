@@ -33,6 +33,10 @@ MSAL_MISSING_MSG = (
     "Microsoft 365 OAuth requires msal — install with: pip install msal"
 )
 
+# `crm serve` sets this False: a device-code login must never start inside the
+# web server (it would block the HTTP request and prompt in the wrong place).
+ALLOW_DEVICE_FLOW = True
+
 
 class OAuthError(Exception):
     """Raised when Microsoft 365 OAuth token acquisition fails."""
@@ -118,14 +122,14 @@ def get_token(cfg):
 
     if not result:
         # Interactive device login needed. Refuse when there's no human to
-        # complete it, rather than blocking on the device-flow poll loop.
-        if not sys.stdin.isatty():
+        # complete it — or when we're inside `crm serve`, where a device-code
+        # prompt would print to the server terminal while the browser request
+        # blocks on the poll loop and just looks stuck. Fail fast instead.
+        if not ALLOW_DEVICE_FLOW or not sys.stdin.isatty():
             raise OAuthError(
-                "Microsoft 365 login required, but there is no cached token "
-                "and this is not an interactive terminal. Run a crm mail "
-                "command interactively once (e.g. `crm followup <contact> "
-                "--dry-run --to you@example.com`) to complete the one-time "
-                "device login, then re-run non-interactively."
+                "Microsoft 365 login required (no valid cached token). Run a "
+                "crm mail command in a terminal once — e.g. `crm thread "
+                "<contact>` — to complete the device login, then retry."
             )
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:

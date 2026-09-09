@@ -30,3 +30,7 @@ crm/_version.py
 
 # macOS
 .DS_Store
+
+# web UI (Svelte/Vite): deps + built bundle
+web/node_modules/
+crm/static/

@@ -63,6 +63,11 @@ COMMANDS
   config [KEY] [VALUE]   Get/set config (e.g., timezone)
   config edit            Edit full config as JSON in $EDITOR (nested blocks)
 
+  import [--days N] [--stage S] [--source SRC] [--dry-run]
+                         Import contacts from people you've emailed (Sent folder)
+  serve [--port N] [--no-browser]
+                         Open the local web UI (pipeline board + import triage)
+
   where                  Show where the data is stored (active backend)
 
   update [--check]       Self-update from the latest GitHub release
@@ -110,7 +115,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import storage
-from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources
+from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources, record_stage_change
 from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS, ConcurrentWriteError, _parse_tz
 from .due import parse_date, relative_date, bucket_due
 from .notes import utc_stamp, add_note, edit_note, delete_note
@@ -496,7 +501,7 @@ def cmd_followup(args):
     if imap_cfg and not no_context and sys.stdin.isatty():
         print(f"{DIM}Fetching recent messages...{RESET}")
         try:
-            messages = fetch_thread(imap_cfg, c["email"])
+            messages = fetch_thread(imap_cfg, c["email"], tz=get_tz(data))
         except Exception as e:
             print(f"{YELLOW}Warning: couldn't fetch thread: {e}{RESET}")
             messages = []
@@ -725,7 +730,20 @@ def _serialize_message(m):
         "to": m["to"],
         "subject": m["subject"],
         "body": m["body"],
+        "quoted": m.get("quoted", ""),
+        "attachments": m.get("attachments", []),
+        "event": m.get("event"),
+        "parts": m.get("parts", []),
     }
+
+
+def _human_size(n):
+    """1234 -> '1.2 KB'."""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
 
 
 def render_thread_plain(messages, contact):
@@ -749,7 +767,19 @@ def render_thread_plain(messages, contact):
         lines.append(f"{DIM}[{m['date']}]{RESET} {dc}{arrow}{RESET} {DIM}{addr_label}{RESET} {addr}")
         lines.append(f"{BOLD}{m['subject'] or '(no subject)'}{RESET}")
         lines.append("")
+        if m.get("event"):
+            e = m["event"]
+            when = e.get("start", "") + (f" – {e['end']}" if e.get("end") else "")
+            tag = " ".join(t for t in (f"[{e['provider']}]" if e.get("provider") else "",
+                                       f"({e['status']})" if e.get("status") else "") if t)
+            lines.append(f"Meeting: {e.get('summary') or '(no title)'} {when} {tag}".rstrip())
+        if m.get("attachments"):
+            lines.append("Attachments: " + ", ".join(
+                f"{a['name']} ({_human_size(a['size'])})" for a in m["attachments"]))
         lines.append(m["body"].rstrip("\n"))
+        if m.get("quoted"):  # --full means full: keep the quoted history, after the own text
+            lines.append("")
+            lines.append(m["quoted"].rstrip("\n"))
     return "\n".join(lines)
 
 
@@ -766,13 +796,32 @@ def render_thread_json(messages):
     )
 
 
+def render_thread_mime(messages):
+    """Diagnostic render: each message's MIME parts (types/sizes, no bodies)
+    and the parsed event — for seeing what the server actually delivered."""
+    lines = []
+    for m in reversed(messages):  # oldest → newest
+        arrow = "←" if m["direction"] == "inbound" else "→"
+        lines.append(f"{m['date']} {arrow} {m.get('subject') or '(no subject)'}"
+                     f"  [uid {m.get('uid', '?')} in {m.get('folder', '?')}]")
+        for p in m.get("parts", []):
+            name = f' name="{p["name"]}"' if p.get("name") else ""
+            disp = f" ({p['disposition']})" if p.get("disposition") else ""
+            lines.append(f"    {p['type']}{name}{disp}  {p['size']} B")
+        e = m.get("event")
+        lines.append(f"    event: {json.dumps(e, ensure_ascii=False) if e else 'none'}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def cmd_thread(args):
     from .mail import fetch_thread
     full = "--full" in args
     as_json = "--json" in args
-    args = [a for a in args if a not in ("--full", "--json")]
+    mime = "--mime" in args
+    args = [a for a in args if a not in ("--full", "--json", "--mime")]
     if len(args) > 1:
-        print("Usage: crm thread [QUERY] [--full] [--json]")
+        print("Usage: crm thread [QUERY] [--full] [--json] [--mime]")
         return
     data = load_data()
     imap_cfg = data.get("config", {}).get("imap")
@@ -796,6 +845,11 @@ def cmd_thread(args):
             print(json.dumps({"error": str(e)}))
         else:
             print(f"{RED}IMAP fetch failed: {e}{RESET}")
+        return
+
+    # --mime: structure diagnostic (part types/sizes + parsed event, no bodies).
+    if mime:
+        print(render_thread_mime(messages))
         return
 
     # --json: emit the message list as JSON (chronological, oldest → newest),
@@ -1036,6 +1090,7 @@ def cmd_stage(args):
     if "notes" not in c:
         c["notes"] = []
     c["notes"].insert(0, {"date": stamp, "text": f"Stage: {old_stage} → {new_stage}"})
+    record_stage_change(c, old_stage, new_stage, stamp)
     
     save_data(data)
     print(f"{BOLD}{c['name']}{RESET}: {DIM}{old_stage}{RESET} → {GREEN}{new_stage}{RESET}")
@@ -1245,12 +1300,204 @@ def cmd_add(args):
         "stage": result["Stage"],
         "next_action": "",
         "next_date": "",
-        "notes": [{"date": stamp, "text": "Added to CRM"}]
+        "notes": [{"date": stamp, "text": "Added to CRM"}],
+        "stage_history": [{"date": stamp, "from": "", "to": result["Stage"]}],
     }
 
     data["contacts"].append(contact)
     save_data(data)
     print(f"{GREEN}Added {BOLD}{contact['name']}{RESET}")
+
+
+# Role/system addresses that aren't people worth tracking.
+_NOISE_LOCALPARTS = ("no-reply", "noreply", "no_reply", "donotreply", "do-not-reply",
+                     "mailer-daemon", "postmaster", "bounce", "bounces")
+# Free-mail domains where the domain says nothing about the company.
+_FREEMAIL_DOMAINS = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com",
+                     "live.com", "yahoo.com", "icloud.com", "me.com",
+                     "protonmail.com", "proton.me", "aol.com"}
+
+
+def _is_noise_address(email):
+    """True for role/automated addresses that shouldn't become contacts."""
+    local = email.split("@")[0].lower()
+    return any(tok in local for tok in _NOISE_LOCALPARTS)
+
+
+def _company_from_email(email):
+    """Best-effort company guess from the domain; blank for free-mail."""
+    domain = email.split("@")[-1].lower()
+    if domain in _FREEMAIL_DOMAINS:
+        return ""
+    return domain.split(".")[0].capitalize()
+
+
+def _is_ignored(email, ignore_set):
+    """True if the address is on the import ignore list.
+
+    Entries may be an exact address (foo@bar.com) or a whole domain written
+    as "@bar.com".
+    """
+    em = email.lower()
+    return em in ignore_set or ("@" + em.split("@")[-1]) in ignore_set
+
+
+def import_candidates(data, recipients):
+    """Filter raw Sent-folder recipients down to importable contacts.
+
+    Drops your own address, existing contacts, role addresses, and anything
+    on the ignore list; adds a company guess. Shared by `crm import` (CLI)
+    and the web UI so both apply identical rules. Returns a list of
+    {"email", "name", "company"} dicts.
+    """
+    cfg = data.get("config", {})
+    imap_cfg = cfg.get("imap", {}) or {}
+    own = {imap_cfg.get("user", "").lower(),
+           cfg.get("smtp", {}).get("user", "").lower()}
+    existing = {c.get("email", "").lower() for c in data["contacts"] if c.get("email")}
+    ignore_set = {e.lower() for e in cfg.get("import_ignore", [])}
+
+    out = []
+    for r in recipients:
+        em = r["email"].lower()
+        if em in own or em in existing or _is_noise_address(em) or _is_ignored(em, ignore_set):
+            continue
+        out.append({"email": r["email"], "name": r.get("name", ""),
+                    "company": _company_from_email(r["email"])})
+    return out
+
+
+def cmd_import(args):
+    """Seed contacts from people you've emailed (Sent folder), via IMAP."""
+    from .mail import fetch_sent_recipients
+
+    flags = {}
+    i = 0
+    while i < len(args):
+        if args[i] == "--dry-run":
+            flags["dry_run"] = True
+            i += 1
+        elif args[i].startswith("--") and i + 1 < len(args):
+            flags[args[i][2:].lower()] = args[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    data = load_data()
+    imap_cfg = data.get("config", {}).get("imap")
+    if not imap_cfg:
+        print(f"{RED}IMAP not configured. Add config.imap to use import.{RESET}")
+        return
+
+    stages = get_stages(data)
+    sources = get_sources(data)
+    stage = flags.get("stage", "contacted")
+    source = flags.get("source", "cold")
+    if stage not in stages:
+        print(f"{RED}Invalid stage: {stage}. Use: {', '.join(stages)}{RESET}")
+        return
+    if source not in sources:
+        print(f"{RED}Invalid source: {source}. Use: {', '.join(sources)}{RESET}")
+        return
+    try:
+        days = int(flags["days"]) if flags.get("days") else None
+    except ValueError:
+        print(f"{RED}--days must be a number.{RESET}")
+        return
+
+    print(f"{DIM}Scanning sent mail...{RESET}")
+    try:
+        recipients = fetch_sent_recipients(imap_cfg, since_days=days)
+    except Exception as e:
+        print(f"{RED}Import failed: {e}{RESET}")
+        return
+
+    candidates = import_candidates(data, recipients)
+
+    if not candidates:
+        print(f"{DIM}No new contacts found in sent mail.{RESET}")
+        return
+
+    # Non-interactive (or --dry-run): just list what would be added.
+    if flags.get("dry_run") or not sys.stdin.isatty():
+        print(f"{len(candidates)} new contact(s) in sent mail:")
+        for r in candidates:
+            print(f"  {r['name'] or '(no name)'} <{r['email']}>")
+        if not sys.stdin.isatty() and not flags.get("dry_run"):
+            print(f"{DIM}Run interactively to review and add them.{RESET}")
+        return
+
+    print(f"\n{len(candidates)} new contact(s). For each: {BOLD}a{RESET}dd / "
+          f"{BOLD}e{RESET}dit / {BOLD}s{RESET}kip / {BOLD}i{RESET}gnore / "
+          f"{BOLD}q{RESET}uit  {DIM}(default: add; ignore = never show again){RESET}")
+    added = 0
+    newly_ignored = []
+    for r in candidates:
+        company = r["company"]
+        name = r["name"] or r["email"].split("@")[0]
+        print(f"\n  {BOLD}{name}{RESET} <{r['email']}>"
+              + (f"  {DIM}{company}{RESET}" if company else ""))
+        try:
+            choice = input("  [a/e/s/i/q]? ").strip().lower() or "a"
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if choice == "q":
+            break
+        if choice == "s":
+            continue
+        if choice == "i":
+            newly_ignored.append(r["email"].lower())
+            print(f"  {DIM}Ignored — won't appear in future imports.{RESET}")
+            continue
+
+        result = {"Name": name, "Email": r["email"], "Phone": "",
+                  "Company": company, "Role": "", "Source": source, "Stage": stage}
+        if choice == "e":
+            edited = form_edit([
+                {"name": "Name", "value": name, "required": True},
+                {"name": "Email", "value": r["email"]},
+                {"name": "Phone", "value": ""},
+                {"name": "Company", "value": company},
+                {"name": "Role", "value": ""},
+                {"name": "Source", "value": source, "options": sources},
+                {"name": "Stage", "value": stage, "options": stages},
+            ], title="Add contact")
+            if not edited:
+                print(f"  {DIM}Skipped.{RESET}")
+                continue
+            result = edited
+
+        data["contacts"].append({
+            "name": result["Name"], "email": result["Email"], "phone": result["Phone"],
+            "company": result["Company"], "role": result["Role"],
+            "source": result["Source"], "stage": result["Stage"],
+            "next_action": "", "next_date": "",
+            "notes": [{"date": utc_stamp(), "text": "Imported from sent mail"}],
+            "stage_history": [{"date": utc_stamp(), "from": "", "to": result["Stage"]}],
+        })
+        added += 1
+        print(f"  {GREEN}Added.{RESET}")
+
+    if newly_ignored:
+        lst = data.setdefault("config", {}).setdefault("import_ignore", [])
+        for em in newly_ignored:
+            if em not in lst:
+                lst.append(em)
+
+    if added or newly_ignored:
+        save_data(data)
+    msg = f"\n{GREEN}Imported {added} contact(s).{RESET}"
+    if newly_ignored:
+        msg += f" {DIM}Added {len(newly_ignored)} to the ignore list.{RESET}"
+    print(msg)
+
+
+def cmd_serve(args):
+    """Start the local web UI (pipeline board + import triage)."""
+    from . import web
+    web.run(args)
+
 
 def cmd_edit(args):
     # Parse query and --flags
@@ -1319,7 +1566,12 @@ def cmd_edit(args):
         c["company"] = result["Company"]
         c["role"] = result["Role"]
         c["source"] = result["Source"]
+        # `crm edit --stage` writes no note (unlike `crm stage`), so it used to
+        # leave no trace; record it structurally so the Timeline stays exact.
+        _old_stage = c.get("stage")
         c["stage"] = result["Stage"]
+        if result["Stage"] != _old_stage:
+            record_stage_change(c, _old_stage, result["Stage"], utc_stamp())
 
     save_data(data)
     print(f"{GREEN}Updated {BOLD}{c['name']}{RESET}")
@@ -1606,6 +1858,8 @@ HELP = {
     "search":  "crm search <TERM>\n  Search across all contact fields and notes.",
     "stages":  "crm stages\n  List all pipeline stages.",
     "config":  "crm config\n  Show all config.\n\ncrm config <key>\n  Get a config value.\n\ncrm config <key> <value>\n  Set a config value.\n\n  Available keys: timezone (e.g. UTC+03:00)\n\ncrm config edit\n  Edit the whole config as JSON in $EDITOR (for nested blocks like\n  smtp/imap; works against S3-backed data too).",
+    "serve":   "crm serve [--port N] [--no-browser]\n  Start the local web UI at http://127.0.0.1:8765: drag-and-drop\n  pipeline board, sortable contacts table, due dashboard, next-action\n  calendar, stage-history timeline, contact drawer (fields, notes,\n  next action, email thread with attachments and meeting cards), and\n  import triage.\n  Localhost-only and token-gated; reuses your data backend\n  and mail config. Ctrl+C to stop.\n  --port N       bind a different port (default: 8765)\n  --no-browser   don't auto-open a browser window\n  Dev: the UI is a Svelte app in web/ — `cd web && npm run build`\n  from a source checkout (see web/README.md).",
+    "import":  "crm import [--days N] [--stage S] [--source SRC] [--dry-run]\n  Scan your Sent folder (over IMAP) and import people you've emailed\n  who aren't contacts yet. Reviews each candidate interactively:\n  a=add, e=edit fields, s=skip (this run), i=ignore (never again), q=quit.\n  --days N     only mail from the last N days (default: all)\n  --stage S    stage for imported contacts (default: contacted)\n  --source SRC source for imported contacts (default: cold)\n  --dry-run    list candidates without adding\n  Requires config.imap. Skips existing contacts, your own address,\n  role addresses (no-reply, mailer-daemon, ...), and anything on the\n  ignore list (config.import_ignore: exact addresses or \"@domain.com\";\n  edit via `crm config edit`).",
 }
 
 def cmd_update(args):
@@ -1747,6 +2001,8 @@ def main():
         "stages": cmd_stages,
         "config": cmd_config,
         "cfg": cmd_config,
+        "import": cmd_import,
+        "serve": cmd_serve,
         "where": cmd_where,
         "path": cmd_where,
         "update": cmd_update,
@@ -1761,7 +2017,7 @@ def main():
             print("Another device wrote to the same key. Re-run the command to retry.")
             sys.exit(1)
         # Show overdue warning (skip for commands that already show it)
-        if cmd not in ("due", "help", "stages", "config", "cfg", "where", "path", "update"):
+        if cmd not in ("due", "help", "stages", "config", "cfg", "where", "path", "update", "serve"):
             try:
                 data = load_data()
                 tz = get_tz(data)

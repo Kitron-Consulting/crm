@@ -262,12 +262,83 @@ crm followup acme --to you@example.com     # override recipient (testing)
 
 The email opens in `$EDITOR` for review. Save = send. Empty = cancel. Sent emails are logged as notes.
 
+### Importing contacts from your mailbox
+
+If you've done outreach outside the CRM, `crm import` reads your **Sent** folder
+over IMAP and pulls in the people you've emailed who aren't contacts yet:
+
+```bash
+crm import                       # review every new address interactively
+crm import --dry-run             # just list who would be imported
+crm import --days 30             # only mail from the last 30 days
+crm import --stage contacted --source cold   # override the defaults
+```
+
+Each candidate is reviewed one by one — **a**dd / **e**dit fields / **s**kip
+(this run) / **i**gnore (never show again) / **q**uit. Names come from the
+message's display name, company is guessed from the email domain (blank for
+gmail/outlook/etc.), and imported contacts default to stage `contacted`, source
+`cold`. Already-known contacts, your own address, and role addresses
+(`no-reply@`, `mailer-daemon@`, …) are skipped. Requires the `imap` block to be
+configured.
+
+**Ignore list.** Pressing **i** adds an address to `config.import_ignore` so it
+never surfaces again — handy for colleagues, vendors, and one-off recipients.
+The list persists in your config (so it syncs via S3). Entries can be an exact
+address (`someone@vendor.com`) or a whole domain (`@vendor.com`); edit it by
+hand any time with `crm config edit`.
+
 **Security note:** For password auth, the SMTP/IMAP password is stored
 plaintext in `crm_data.json` — keep that file private (`chmod 600`). For
 `oauth-ms`, **no password is stored**; instead MSAL keeps a refresh-token
 cache at `~/.config/kitron-crm/msal_cache.json`. That file is a bearer
 credential — `crm` writes it `chmod 600`. Do not commit it or sync it (it
 lives outside `crm_data.json` precisely so it never rides along to S3).
+
+## Web UI (local)
+
+Some tasks — triaging imported contacts, glancing at the whole pipeline — are
+just nicer in a browser than a terminal. `crm serve` starts a small local web
+app for them:
+
+```bash
+crm serve                 # opens http://127.0.0.1:8765 in your browser
+crm serve --port 8790     # different port
+crm serve --no-browser    # just start the server, don't open a window
+```
+
+It's **localhost-only** and **token-gated** (a random token in the URL guards
+the API, so a stray web page can't drive your CRM). The Python side is stdlib
+only, and it reuses your existing data backend and mail config — so your data
+and OAuth token never leave the machine. Ctrl+C stops the server.
+
+Screens:
+- **Board** — kanban by stage; drag a card to change stage; filter by stage /
+  source / overdue / no-next-action; global search (`/`).
+- **Contacts** — sortable table over the same search and filters.
+- **Due** — overdue, due in 7 days, and no-next-action, with one-click
+  Done / Set next.
+- **Calendar** — month grid of next actions: drag a contact to another day to
+  reschedule, click a day to set a next action, drag an unscheduled contact
+  onto a day to schedule it.
+- **Timeline** — each contact's stage history as time bars (stuck deals and
+  cycle times at a glance); hover for durations, click to open. Stage moves
+  are recorded structurally (`stage_history`) from now on; older contacts are
+  reconstructed from their "Stage: a → b" notes.
+- **Contact drawer** — edit fields, notes timeline, next action (`+7d` dates),
+  the email thread over IMAP (rich-text mail rendered as text, quoted history
+  collapsed, attachments with in-app preview, calendar/Teams invites as
+  cards), remove.
+- **Import** — scan Sent, then add / edit inline / ignore candidates.
+
+Shortcuts: `/` search · `n` new contact · `1`–`6` switch views · `Esc` close.
+
+The frontend is a **Svelte 5 + Vite** app in `web/`, compiled to a single
+self-contained `crm/static/index.html` (gitignored; the release workflow builds
+it and it ships inside the wheel/binary). From a source checkout, build it once
+with `cd web && npm install && npm run build`. For live-reload development run
+`crm serve --no-browser`, then `cd web && npm run dev` and open the Vite URL
+with your `?t=…` token appended — see `web/README.md`.
 
 ## Data
 

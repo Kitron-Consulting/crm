@@ -210,7 +210,8 @@ def test_get_token_non_tty_fails_fast(monkeypatch, tmp_path):
     _install_fake_msal(monkeypatch, App())
     with pytest.raises(msauth.OAuthError) as exc:
         msauth.get_token(FULL_CFG)
-    assert "interactive" in str(exc.value).lower()
+    msg = str(exc.value).lower()
+    assert "login required" in msg and "device login" in msg  # fails fast, points at the CLI
 
 
 def test_get_token_missing_msal(monkeypatch, tmp_path):

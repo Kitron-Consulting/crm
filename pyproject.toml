@@ -34,3 +34,6 @@ version-file = "crm/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["crm"]
+# The built Svelte web UI is gitignored build output; hatchling skips
+# gitignored files unless they're listed as artifacts. CI builds it first.
+artifacts = ["crm/static/index.html"]

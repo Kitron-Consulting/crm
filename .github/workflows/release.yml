@@ -40,10 +40,23 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web UI (Svelte → crm/static/index.html)
+        run: |
+          cd web && npm ci && npm run build
+          test -f ../crm/static/index.html
+
       - name: Build wheel
         run: |
           pip install build
           python -m build --wheel
+          # the built UI must ride along in the wheel
+          unzip -l dist/crm-*.whl | grep -q "crm/static/index.html"
 
       - name: Build PyApp binary
         env:
@@ -80,10 +93,23 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web UI (Svelte → crm/static/index.html)
+        run: |
+          cd web && npm ci && npm run build
+          test -f ../crm/static/index.html
+
       - name: Build wheel
         run: |
           pip install build
           python -m build --wheel
+          # the built UI must ride along in the wheel
+          unzip -l dist/crm-*.whl | grep -q "crm/static/index.html"
 
       - name: Build PyApp binary
         env:
