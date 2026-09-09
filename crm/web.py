@@ -166,13 +166,23 @@ def _str(v):
 # --- API logic (no HTTP; unit-testable) ---------------------------------
 
 def build_state(db):
-    """Snapshot the board needs: contacts (with ids + local note dates),
-    the stage/source vocabularies, and today's date in the user's tz."""
+    """Snapshot the board needs: contacts (with ids, local note dates, and the
+    next upcoming meeting when cached), the stage/source vocabularies, and
+    today's date in the user's tz."""
+    now = datetime.now(get_tz(db))
+    upcoming = db.next_meetings(now.strftime("%Y-%m-%d %H:%M"))
+    contacts = []
+    for c in db.list_contacts():
+        sc = _serialize_contact(db, c)
+        if c["id"] in upcoming:
+            sc["next_meeting"] = upcoming[c["id"]]
+        contacts.append(sc)
     return {
-        "contacts": [_serialize_contact(db, c) for c in db.list_contacts()],
+        "contacts": contacts,
         "stages": db.stages(),
         "sources": db.sources(),
-        "today": _today(db),
+        "today": now.strftime("%Y-%m-%d"),
+        "meetings_fetched_at": db.meetings_fetched_at(),
     }
 
 
@@ -376,6 +386,21 @@ def api_commit(db, body):
     return {"added": added, "ignored": ignored}
 
 
+def api_refresh_meetings(db, body):
+    """Rescan the mailbox for upcoming meetings and rebuild the (synced) cache.
+    body = {"days": int?}. Returns {"count", "fetched_at"}."""
+    from . import mail
+
+    imap_cfg = db.imap()
+    if not imap_cfg:
+        raise RuntimeError("IMAP not configured — add config.imap to sync meetings.")
+    days = body.get("days")
+    kwargs = {"days_back": int(days)} if days else {}
+    meetings = mail.fetch_upcoming_meetings(imap_cfg, tz=get_tz(db), **kwargs)
+    db.set_meetings(meetings)
+    return {"count": len(meetings), "fetched_at": db.meetings_fetched_at()}
+
+
 # POST routes that load → mutate → save. Each maps to an api_* function
 # taking (data, body) and returning the response dict.
 _MUTATIONS = {
@@ -386,6 +411,7 @@ _MUTATIONS = {
     "/api/contacts/done": api_done,
     "/api/contacts/remove": api_remove_contact,
     "/api/import/commit": api_commit,
+    "/api/meetings/refresh": api_refresh_meetings,
 }
 
 

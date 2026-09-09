@@ -322,6 +322,50 @@ class Db:
             "INSERT INTO stage_history(contact_id, date, from_stage, to_stage) VALUES(?,?,?,?)",
             (cid, utc_stamp() if stamp is None else stamp, old or "", new))
 
+    # ---------------- meetings cache ----------------
+
+    def set_meetings(self, meetings):
+        """Replace the whole meetings cache (it is fully rebuildable from IMAP).
+        Each meeting is a dict with `email` (the counterparty) + event fields;
+        contact_id is resolved from that email against active contacts here."""
+        from .notes import utc_stamp
+        self.conn.execute("DELETE FROM meetings")
+        email_map = {}
+        for r in self.conn.execute(
+                "SELECT id, lower(email) e FROM contacts WHERE removed_at IS NULL AND email <> ''"):
+            email_map.setdefault(r["e"], r["id"])
+        fetched = utc_stamp()
+        for m in meetings:
+            cid = email_map.get((m.get("email") or "").strip().lower())
+            self.conn.execute(
+                'INSERT INTO meetings(contact_id, email, start, "end", summary, status, location, '
+                'organizer, join_url, provider, all_day, folder, uid, fetched_at) '
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (cid, m.get("email", "") or "", m.get("start", "") or "", m.get("end", "") or "",
+                 m.get("summary", "") or "", m.get("status", "") or "", m.get("location", "") or "",
+                 m.get("organizer", "") or "", m.get("join_url", "") or "", m.get("provider", "") or "",
+                 1 if m.get("all_day") else 0, m.get("folder", "") or "", m.get("uid", "") or "", fetched))
+
+    def next_meetings(self, now_str):
+        """{contact_id: soonest upcoming meeting dict} for contacts that have a
+        future meeting (start >= now_str). Only correlated meetings are returned."""
+        out = {}
+        for r in self.conn.execute(
+                'SELECT contact_id, start, "end" AS end_, summary, status, location, join_url, '
+                "provider, all_day FROM meetings "
+                "WHERE contact_id IS NOT NULL AND start >= ? ORDER BY start ASC", (now_str,)):
+            cid = r["contact_id"]
+            if cid not in out:  # rows are start-ordered, so the first is soonest
+                out[cid] = {"start": r["start"], "end": r["end_"], "summary": r["summary"],
+                            "status": r["status"], "location": r["location"],
+                            "join_url": r["join_url"], "provider": r["provider"],
+                            "all_day": bool(r["all_day"])}
+        return out
+
+    def meetings_fetched_at(self):
+        row = self.conn.execute("SELECT MAX(fetched_at) f FROM meetings").fetchone()
+        return row["f"] if row and row["f"] else ""
+
     # ---------------- one-time JSON import ----------------
 
     def _insert_contact_verbatim(self, c, removed_at=None):

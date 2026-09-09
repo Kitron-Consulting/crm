@@ -817,6 +817,71 @@ def _fetch_folder(imap, folder, contact_email, direction, tz=None):
     return results
 
 
+def upcoming_meetings(pairs, now_str):
+    """Pure: fold (counterparty_email, event) pairs into de-duped upcoming
+    meetings. Keeps events whose `start` is >= now_str (string compare on
+    "YYYY-MM-DD HH:MM"), drops cancellations, dedupes on join URL / normalised
+    subject + start. Returns meeting dicts (event fields + `email`), soonest first."""
+    seen = {}
+    for email, ev in pairs:
+        if not ev:
+            continue
+        start = (ev.get("start") or "").strip()
+        if not start or start < now_str or ev.get("status") == "cancelled":
+            continue
+        key = (ev.get("join_url") or _norm_subject(ev.get("summary", "")) or start) + "|" + start
+        if key not in seen:
+            seen[key] = {**ev, "email": (email or "").strip()}
+    return sorted(seen.values(), key=lambda m: m["start"])
+
+
+def _scan_folder_events(imap, folder, direction, tz, since, limit):
+    """Yield (counterparty_email, event) for recent messages in `folder` that
+    carry a calendar event. `direction` picks the counterparty side: inbound
+    reads From, outbound reads To."""
+    out = []
+    try:
+        typ, _ = imap.select(_imap_mailbox(folder), readonly=True)
+        if typ != "OK":
+            return out
+        typ, data = imap.search(None, "SINCE", since) if since else imap.search(None, "ALL")
+        if typ != "OK" or not data or not data[0]:
+            return out
+        for num in data[0].split()[-limit:]:
+            typ, fetched = imap.fetch(num, "(RFC822)")
+            if typ != "OK" or not fetched or not isinstance(fetched[0], tuple):
+                continue
+            msg = emaillib.message_from_bytes(fetched[0][1])
+            ev = extract_event(msg, tz)
+            if not ev or not ev.get("start"):
+                continue
+            _, addr = parseaddr(msg.get("From", "") if direction == "inbound" else msg.get("To", ""))
+            out.append((addr, {**ev, "folder": folder,
+                               "uid": num.decode() if isinstance(num, bytes) else str(num)}))
+    except Exception:
+        pass
+    return out
+
+
+def fetch_upcoming_meetings(imap_cfg, tz=None, days_back=45, now_str=None):
+    """Scan Inbox + Sent for calendar events and return de-duped upcoming
+    meetings, each carrying the counterparty `email`. Live-mailbox dependent;
+    the pure folding is `upcoming_meetings`, unit-tested separately."""
+    host = imap_cfg["host"]
+    port = imap_cfg.get("port", 993)
+    inbox = imap_cfg.get("inbox_folder", "INBOX")
+    sent = imap_cfg.get("sent_folder", "Sent")
+    since = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+    if now_str is None:
+        now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+    pairs = []
+    with imaplib.IMAP4_SSL(host, port, timeout=IMAP_TIMEOUT) as m:
+        _imap_authenticate(m, imap_cfg)
+        pairs += _scan_folder_events(m, inbox, "inbound", tz, since, 400)
+        pairs += _scan_folder_events(m, sent, "outbound", tz, since, 400)
+    return upcoming_meetings(pairs, now_str)
+
+
 def fetch_thread(imap_cfg, contact_email, tz=None):
     """Fetch recent messages between the user and a contact. Returns sorted list.
 
