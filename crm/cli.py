@@ -1093,22 +1093,28 @@ def cmd_stage(args):
             return
 
         stages = db.stages()
-        if not new_stage:
-            new_stage = pick_one(stages, prompt=f"New stage for {c['name']} (current: {c['stage']})")
-            if not new_stage:
+        # "none"/"unset"/"-" clears the stage (a contact may have no stage).
+        if new_stage in ("none", "unset", "-", "clear"):
+            new_stage = ""
+        elif new_stage is None:
+            picked = pick_one(["(no stage)"] + stages,
+                              prompt=f"New stage for {c['name']} (current: {c['stage'] or '(none)'})")
+            if picked is None:
                 return
+            new_stage = "" if picked == "(no stage)" else picked
 
-        if new_stage not in stages:
-            print(f"Invalid stage. Use: {', '.join(stages)}")
+        if new_stage and new_stage not in stages:
+            print(f"Invalid stage. Use: none, {', '.join(stages)}")
             return
 
         old_stage = c["stage"]
         db.update_contact(c["id"], {"stage": new_stage})
-        db.add_note(c["id"], f"Stage: {old_stage} → {new_stage}")
-        db.record_stage_change(c["id"], old_stage, new_stage)
+        if new_stage != old_stage:
+            db.add_note(c["id"], f"Stage: {old_stage or '(none)'} → {new_stage or '(none)'}")
+            db.record_stage_change(c["id"], old_stage, new_stage)
 
         storage.push_db(db)
-        print(f"{BOLD}{c['name']}{RESET}: {DIM}{old_stage}{RESET} → {GREEN}{new_stage}{RESET}")
+        print(f"{BOLD}{c['name']}{RESET}: {DIM}{old_stage or '(none)'}{RESET} → {GREEN}{new_stage or '(none)'}{RESET}")
     finally:
         storage.close_db(db)
 

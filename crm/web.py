@@ -150,7 +150,8 @@ def _validate_email(email):
 
 
 def _validate_stage(stage, stages):
-    if stage not in stages:
+    # "" is valid — a contact may have no stage (not in the pipeline).
+    if stage and stage not in stages:
         raise ValueError(f"Invalid stage: {stage}. Use: {', '.join(stages)}")
 
 
@@ -244,7 +245,7 @@ def api_update_contact(db, body):
     db.update_contact(c["id"], updates)
     new_stage = updates.get("stage", old_stage)
     if "stage" in updates and new_stage != old_stage:
-        db.add_note(c["id"], f"Stage: {old_stage} → {new_stage}")
+        db.add_note(c["id"], f"Stage: {old_stage or '(none)'} → {new_stage or '(none)'}")
         db.record_stage_change(c["id"], old_stage, new_stage)
 
     return {"contact": _serialize_contact(db, db.get_contact(c["id"]))}

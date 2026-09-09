@@ -139,6 +139,15 @@ def test_api_update_contact_stage_change_adds_cmd_stage_note():
     assert res["contact"]["id"] == 1 and res["contact"]["notes"][0]["text"] == "Stage: cold → contacted"
 
 
+def test_api_update_contact_can_unset_stage():
+    db = _db([{}])
+    res = web.api_update_contact(db, {"id": 1, "name": "Ada", "fields": {"stage": ""}})
+    assert res["contact"]["stage"] == ""
+    c = db.get_contact(1)
+    assert c["stage"] == ""
+    assert c["notes"][0]["text"] == "Stage: cold → (none)"
+
+
 def test_api_update_contact_same_stage_no_note_and_ignores_unknown_keys():
     db = _db([{}])
     web.api_update_contact(db, {"id": 1, "name": "Ada",

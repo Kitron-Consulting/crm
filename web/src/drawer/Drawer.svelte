@@ -61,8 +61,9 @@
         <div class="sub">{subline(c) || c.email || ''}</div>
       </div>
       <div class="dr-head-ctl">
-        <span class="stage-select tint" style:--h={tint.h} style:--s={tint.sat}>
+        <span class="stage-select tint" style:--h={tint.h} style:--s={c.stage ? tint.sat : 0}>
           <select value={c.stage} onchange={(e) => changeStage(e, c)} aria-label="Stage">
+            <option value="">— No stage —</option>
             {#each stageOptions as s (s)}<option value={s}>{s}</option>{/each}
           </select>
           <Icon name="chevron" size={12} />

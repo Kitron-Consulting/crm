@@ -89,6 +89,7 @@ select.ctl { padding-right:28px; cursor:pointer; }
         font-size:12px; font-weight:500; max-width:100%; white-space:nowrap; }
 .chip.sm { height:20px; font-size:11px; padding:0 7px; }
 .chip.stage { background:var(--stage-bg); color:var(--stage-fg); font-weight:600; }
+.chip.nostage { background:var(--surface-2); color:var(--faint); border:1px solid var(--line); font-weight:600; }
 .chip.next { background:var(--surface-2); color:var(--muted); border:1px solid var(--line); }
 .chip.next .chip-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:170px; }
 .chip.next .chip-date { font-variant-numeric:tabular-nums; opacity:.9; }

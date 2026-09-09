@@ -28,11 +28,13 @@
   const columns = $derived.by(() => {
     const m = new Map(S.stages.map((s) => [s, []]))
     for (const c of list) {
+      if (!c.stage) continue // no stage = not in the pipeline; shown in Contacts, not the board
       if (!m.has(c.stage)) m.set(c.stage, [])
       m.get(c.stage).push(c)
     }
     return [...m].map(([stage, cards]) => ({ stage, cards, ...stageStyle(stage) }))
   })
+  const staged = $derived(columns.reduce((n, col) => n + col.cards.length, 0))
 
   $effect(() => {
     document.body.classList.toggle('dragging-any', dragId !== null)
@@ -93,7 +95,7 @@
       <Icon name="calendar" size={14} />{syncing ? 'Syncing…' : 'Sync meetings'}
     </button>
   </ViewHead>
-  <FiltersBar shown={list.length} />
+  <FiltersBar shown={staged} />
   {#if !S.contacts.length}
     <EmptyState title="No contacts yet" hint="Add your first contact, or import people you've emailed.">
       <div>
