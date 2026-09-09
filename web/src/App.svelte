@@ -10,6 +10,7 @@
   import Import from './views/Import.svelte'
   import Calendar from './views/Calendar.svelte'
   import Timeline from './views/Timeline.svelte'
+  import Accounts from './views/Accounts.svelte'
   import Drawer from './drawer/Drawer.svelte'
   import AccountDrawer from './drawer/AccountDrawer.svelte'
   import { TOKEN } from './lib/api.js'
@@ -51,7 +52,7 @@
     } else if (e.key === 'n') {
       e.preventDefault()
       newContactDialog()
-    } else if (e.key >= '1' && e.key <= '6') setView(VIEWS[Number(e.key) - 1])
+    } else if (e.key >= '1' && e.key <= '7') setView(VIEWS[Number(e.key) - 1])
     else if (UI.view === 'calendar') {
       // Month navigation only while the Calendar is showing.
       if (e.key === '[') calShift(-1)
@@ -114,6 +115,8 @@
           <Calendar />
         {:else if UI.view === 'timeline'}
           <Timeline />
+        {:else if UI.view === 'accounts'}
+          <Accounts />
         {/if}
       </main>
     </div>

@@ -21,6 +21,12 @@
     { view: 'board', label: 'Board', badge: n, cls: '', title: '' },
     { view: 'contacts', label: 'Contacts', badge: n, cls: '', title: '' },
     {
+      view: 'accounts',
+      label: 'Accounts',
+      badge: S.accounts.length ? String(S.accounts.length) : '',
+      cls: '', title: '',
+    },
+    {
       view: 'due',
       label: 'Due',
       badge: overdue ? String(overdue) : soon ? String(soon) : '',
@@ -67,7 +73,7 @@
   <div class="sidebar-foot">
     <div><span>Search</span><kbd>/</kbd></div>
     <div><span>New contact</span><kbd>n</kbd></div>
-    <div><span>Switch view</span><kbd>1–6</kbd></div>
+    <div><span>Switch view</span><kbd>1–7</kbd></div>
     {#if UI.view === 'calendar'}
       <div><span>Month</span><kbd>[</kbd> <kbd>]</kbd> <kbd>t</kbd></div>
     {/if}

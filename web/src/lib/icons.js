@@ -2,6 +2,7 @@
 export const ICONS = {
   board: 'M4 5h4v14H4zM10 5h4v10h-4zM16 5h4v7h-4z',
   contacts: 'M4 7h16M4 12h16M4 17h10',
+  accounts: 'M4 21h16M7 21V5h10v16M10 9h1M14 9h1M10 13h1M14 13h1M10 17h1M14 17h1',
   due: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm0 4v5l3 2',
   import: 'M12 4v11m-5-5 5 5 5-5M4 20h16',
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zm9 16-4-4',

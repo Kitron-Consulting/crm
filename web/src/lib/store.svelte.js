@@ -8,7 +8,7 @@ import { addMonths } from './cal.js'
 
 // Index + 1 is the keyboard shortcut (1–6). Calendar and Timeline sit between
 // Due and Import in the sidebar but take shortcuts 5 and 6 so Import stays on 4.
-export const VIEWS = ['board', 'contacts', 'due', 'import', 'calendar', 'timeline']
+export const VIEWS = ['board', 'contacts', 'due', 'import', 'calendar', 'timeline', 'accounts']
 export const CLOSED = new Set(['won', 'lost', 'dormant'])
 const HUES = [222, 262, 300, 190, 28, 168, 340, 48]
 /** Days in the current stage after which an open contact counts as "stuck". */
@@ -62,6 +62,15 @@ export const accountById = (id) => S.accounts.find((a) => a.id === id)
 /** Active contacts linked to an account, name-sorted. */
 export const contactsInAccount = (accountId) =>
   S.contacts.filter((c) => c.account_id === accountId).sort((a, b) => cmpStr(a.name, b.name))
+
+/** Accounts matching the search box (name or domain), name-sorted. */
+export function visibleAccounts() {
+  const q = UI.q.trim().toLowerCase()
+  const rows = q
+    ? S.accounts.filter((a) => a.name.toLowerCase().includes(q) || (a.domain || '').toLowerCase().includes(q))
+    : S.accounts
+  return [...rows].sort((a, b) => cmpStr(a.name, b.name))
+}
 
 export function daysUntil(iso) {
   const a = Date.parse(S.today + 'T00:00:00')

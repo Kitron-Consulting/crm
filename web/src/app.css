@@ -198,6 +198,7 @@ body.dragging-any .card { transition:none; }
 .table-wrap { border:1px solid var(--line); border-radius:var(--r-lg); background:var(--surface);
               flex:0 1 auto; min-height:0; overflow:auto; }
 table { width:100%; border-collapse:separate; border-spacing:0; font-size:13px; }
+td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; width:90px; }
 th { position:sticky; top:0; z-index:1; background:var(--surface); text-align:left; font-size:12px; font-weight:500;
      color:var(--muted); padding:0 12px; height:38px; border-bottom:1px solid var(--line); white-space:nowrap; user-select:none; }
 th.sortable { cursor:pointer; }
