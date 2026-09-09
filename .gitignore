@@ -1,5 +1,12 @@
-# Data file — don't commit your contacts
+# Data files — never commit your contacts (JSON or SQLite), copies or backups
 crm_data.json
+crm_real*.json
+*.jsonbak
+*.db
+*.db-journal
+
+# Session scratchpad (local seeds, screenshots, throwaway test deps)
+scratchpad/
 
 # Demo recording source files
 demo.sh
