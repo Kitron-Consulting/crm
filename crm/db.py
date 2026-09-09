@@ -26,7 +26,8 @@ from .stages import DEFAULT_STAGES, DEFAULT_SOURCES
 
 # Bump when the SQLite schema changes (independent of the old JSON `version`,
 # which tops out at 4 and is consumed once by the JSON->SQLite import).
-SCHEMA_VERSION = 1
+#   1: initial   2: accounts entity + contacts.account_id
+SCHEMA_VERSION = 2
 
 # Stored contact columns, in the canonical order. `id` and `removed_at` are
 # handled separately; the rest mirror the old contact dict's editable body.
@@ -42,6 +43,16 @@ CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL          -- JSON-encoded value
 );
+-- The organisation a contact belongs to. `name` mirrors contacts.company (kept
+-- in sync both ways); domain/notes make it a first-class, annotatable record.
+CREATE TABLE IF NOT EXISTS accounts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL DEFAULT '',
+    domain     TEXT NOT NULL DEFAULT '',
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_name ON accounts(name COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS contacts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL DEFAULT '',
@@ -53,10 +64,12 @@ CREATE TABLE IF NOT EXISTS contacts (
     stage       TEXT NOT NULL DEFAULT '',
     next_action TEXT NOT NULL DEFAULT '',
     next_date   TEXT NOT NULL DEFAULT '',
+    account_id  INTEGER,         -- -> accounts.id (resolved from company name)
     removed_at  TEXT,            -- NULL = active; set = soft-deleted
     created_seq INTEGER          -- import/restore order tiebreaker
 );
 CREATE INDEX IF NOT EXISTS idx_contacts_active ON contacts(removed_at);
+CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id);
 CREATE TABLE IF NOT EXISTS notes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
@@ -101,6 +114,7 @@ def _row_contact(row):
     c = {"id": row["id"]}
     for col in CONTACT_COLUMNS:
         c[col] = row[col]
+    c["account_id"] = row["account_id"]
     if row["removed_at"] is not None:
         c["removed_at"] = row["removed_at"]
     return c
@@ -130,10 +144,14 @@ class Db:
 
     def init_schema(self):
         self.conn.executescript(_DDL)
-        cur = self.conn.execute("SELECT value FROM meta WHERE key = 'schema_version'")
-        if cur.fetchone() is None:
-            self.conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
-                              (str(SCHEMA_VERSION),))
+        # Additive column upgrades for dbs created under an older schema version.
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(contacts)")}
+        if "account_id" not in cols:
+            self.conn.execute("ALTER TABLE contacts ADD COLUMN account_id INTEGER")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id)")
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),))
         self.conn.commit()
 
     def close(self):
@@ -233,19 +251,36 @@ class Db:
             return None
         return self._hydrate([row])[0]
 
+    def _link_account(self, company, stamp):
+        """Resolve a company name to (account_id, canonical_name). Find-or-create
+        by case-insensitive name; empty name -> (None, ""). The canonical name is
+        the account's stored spelling, so contacts at one account agree on casing."""
+        name = (company or "").strip()
+        if not name:
+            return None, ""
+        row = self.conn.execute(
+            "SELECT id, name FROM accounts WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+        if row:
+            return row["id"], row["name"]
+        cur = self.conn.execute(
+            "INSERT INTO accounts(name, created_at) VALUES(?, ?)", (name, stamp))
+        return cur.lastrowid, name
+
     def add_contact(self, fields, note_text="Added to CRM", stamp=None):
         """Insert a contact, seeding the creation note + stage_history entry
-        (matching the old add literals). Returns the new contact dict."""
+        (matching the old add literals) and linking its account. Returns the dict."""
         from .notes import utc_stamp
         if stamp is None:
             stamp = utc_stamp()
         vals = {col: str(fields.get(col, "") or "") for col in CONTACT_COLUMNS}
+        aid, canon = self._link_account(vals["company"], stamp)
+        vals["company"] = canon
         cols = ",".join(CONTACT_COLUMNS)
         ph = ",".join("?" * len(CONTACT_COLUMNS))
         cur = self.conn.execute(
-            f"INSERT INTO contacts({cols}, created_seq) VALUES({ph}, "
+            f"INSERT INTO contacts({cols}, account_id, created_seq) VALUES({ph}, ?, "
             "(SELECT COALESCE(MAX(created_seq), 0) + 1 FROM contacts))",
-            [vals[c] for c in CONTACT_COLUMNS])
+            [vals[c] for c in CONTACT_COLUMNS] + [aid])
         cid = cur.lastrowid
         if note_text:
             self.conn.execute("INSERT INTO notes(contact_id, date, text) VALUES(?,?,?)",
@@ -258,9 +293,17 @@ class Db:
         return self.get_contact(cid)
 
     def update_contact(self, cid, fields):
-        """Write a subset of CONTACT_COLUMNS. Returns True if the contact exists."""
+        """Write a subset of CONTACT_COLUMNS. Re-links the account when `company`
+        changes. Returns True if the contact exists."""
+        from .notes import utc_stamp
+        fields = dict(fields)
+        if "company" in fields:
+            aid, canon = self._link_account(fields["company"], utc_stamp())
+            fields["company"] = canon
         sets = [(col, str(fields[col] if fields[col] is not None else ""))
                 for col in CONTACT_COLUMNS if col in fields]
+        if "company" in fields:
+            sets.append(("account_id", aid))
         if not sets:
             return self.get_contact(cid) is not None
         assign = ", ".join(f"{c} = ?" for c, _ in sets)
@@ -287,6 +330,57 @@ class Db:
         cur = self.conn.execute(
             "UPDATE contacts SET removed_at = NULL WHERE id = ? AND removed_at IS NOT NULL", (cid,))
         return cur.rowcount > 0
+
+    # ---------------- accounts ----------------
+
+    def list_accounts(self):
+        """All accounts with their active-contact count, name-sorted."""
+        return [{"id": r["id"], "name": r["name"], "domain": r["domain"],
+                 "notes": r["notes"], "contact_count": r["n"]}
+                for r in self.conn.execute(
+                    "SELECT a.id, a.name, a.domain, a.notes, "
+                    "  COUNT(c.id) n FROM accounts a "
+                    "  LEFT JOIN contacts c ON c.account_id = a.id AND c.removed_at IS NULL "
+                    "GROUP BY a.id ORDER BY a.name COLLATE NOCASE")]
+
+    def get_account(self, aid):
+        r = self.conn.execute(
+            "SELECT id, name, domain, notes FROM accounts WHERE id = ?", (aid,)).fetchone()
+        return None if r is None else {"id": r["id"], "name": r["name"],
+                                       "domain": r["domain"], "notes": r["notes"]}
+
+    def account_contacts(self, aid):
+        """Active contacts at an account (light dicts for the panel/siblings)."""
+        return [{"id": r["id"], "name": r["name"], "role": r["role"],
+                 "email": r["email"], "stage": r["stage"]}
+                for r in self.conn.execute(
+                    "SELECT id, name, role, email, stage FROM contacts "
+                    "WHERE account_id = ? AND removed_at IS NULL ORDER BY name COLLATE NOCASE", (aid,))]
+
+    def update_account(self, aid, fields):
+        """Update an account's name/domain/notes. Renaming cascades to the
+        `company` string of every linked contact so the two stay in sync.
+        Returns the updated account dict, or None if it doesn't exist.
+        Raises ValueError if a rename collides with another account's name."""
+        acc = self.get_account(aid)
+        if acc is None:
+            return None
+        if "name" in fields:
+            name = (fields["name"] or "").strip()
+            if not name:
+                raise ValueError("Account name is required.")
+            clash = self.conn.execute(
+                "SELECT id FROM accounts WHERE name = ? COLLATE NOCASE AND id <> ?",
+                (name, aid)).fetchone()
+            if clash:
+                raise ValueError(f"Another account is already named {name!r}.")
+            self.conn.execute("UPDATE accounts SET name = ? WHERE id = ?", (name, aid))
+            self.conn.execute("UPDATE contacts SET company = ? WHERE account_id = ?", (name, aid))
+        for col in ("domain", "notes"):
+            if col in fields:
+                self.conn.execute(f"UPDATE accounts SET {col} = ? WHERE id = ?",
+                                  (str(fields[col] or ""), aid))
+        return self.get_account(aid)
 
     # ---------------- notes ----------------
 
@@ -370,14 +464,17 @@ class Db:
 
     def _insert_contact_verbatim(self, c, removed_at=None):
         """Insert an existing contact dict as-is (its own notes + stage_history),
-        without seeding anything. Used only by the JSON import."""
-        vals = [str(c.get(col, "") or "") for col in CONTACT_COLUMNS]
+        linking/creating its account. Used only by the JSON import."""
+        from .notes import utc_stamp
+        vals = {col: str(c.get(col, "") or "") for col in CONTACT_COLUMNS}
+        aid, canon = self._link_account(vals["company"], utc_stamp())
+        vals["company"] = canon  # normalise casing to the account's canonical name
         cols = ",".join(CONTACT_COLUMNS)
         ph = ",".join("?" * len(CONTACT_COLUMNS))
         cur = self.conn.execute(
-            f"INSERT INTO contacts({cols}, removed_at, created_seq) VALUES({ph}, ?, "
+            f"INSERT INTO contacts({cols}, account_id, removed_at, created_seq) VALUES({ph}, ?, ?, "
             "(SELECT COALESCE(MAX(created_seq), 0) + 1 FROM contacts))",
-            vals + [removed_at])
+            [vals[col] for col in CONTACT_COLUMNS] + [aid, removed_at])
         cid = cur.lastrowid
         # Notes are stored newest-first in the JSON list. Insert oldest-first so
         # the autoincrement id grows with age and ORDER BY id DESC = newest-first.

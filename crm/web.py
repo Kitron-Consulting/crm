@@ -179,6 +179,7 @@ def build_state(db):
         contacts.append(sc)
     return {
         "contacts": contacts,
+        "accounts": db.list_accounts(),
         "stages": db.stages(),
         "sources": db.sources(),
         "today": now.strftime("%Y-%m-%d"),
@@ -386,6 +387,21 @@ def api_commit(db, body):
     return {"added": added, "ignored": ignored}
 
 
+def api_update_account(db, body):
+    """Edit an account's name/domain/notes. body = {"id", "fields": {name?,
+    domain?, notes?}}. A rename cascades to linked contacts' company (in the DAL);
+    a name clash or blank name is a ValueError (400)."""
+    aid = body.get("id")
+    if isinstance(aid, bool) or not isinstance(aid, int):
+        raise StaleError(STALE_MESSAGE)
+    fields = body.get("fields") or {}
+    allowed = {k: _str(fields[k]) for k in ("name", "domain", "notes") if k in fields}
+    acc = db.update_account(aid, allowed)
+    if acc is None:
+        raise StaleError(STALE_MESSAGE)
+    return {"account": acc}
+
+
 def api_refresh_meetings(db, body):
     """Rescan the mailbox for upcoming meetings and rebuild the (synced) cache.
     body = {"days": int?}. Returns {"count", "fetched_at"}."""
@@ -411,6 +427,7 @@ _MUTATIONS = {
     "/api/contacts/done": api_done,
     "/api/contacts/remove": api_remove_contact,
     "/api/import/commit": api_commit,
+    "/api/accounts/update": api_update_account,
     "/api/meetings/refresh": api_refresh_meetings,
 }
 

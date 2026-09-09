@@ -109,7 +109,7 @@ def test_api_add_contact_defaults_and_note():
     assert stored["notes"][0]["text"] == "Added to CRM"
     assert len(stored["notes"][0]["date"]) == 16  # "YYYY-MM-DD HH:MM" UTC stamp
     assert set(stored) == {"id", "name", "email", "phone", "company", "role", "source",
-                           "stage", "next_action", "next_date", "notes", "stage_history"}
+                           "stage", "next_action", "next_date", "account_id", "notes", "stage_history"}
     assert stored["stage_history"] == [{"date": stored["notes"][0]["date"], "from": "", "to": "cold"}]
 
 
