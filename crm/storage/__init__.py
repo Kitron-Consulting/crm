@@ -1,42 +1,47 @@
-"""Storage layer: backend selection, schema migrations, tz helpers.
+"""Storage layer: backend selection, JSON→SQLite upgrade, tz helpers.
 
-Backend is chosen at import time based on CRM_STORAGE:
+The store is a single SQLite database file (crm/db.py). Backends are dumb
+transports for that file's bytes:
 
-  unset / "file:..."     → local backend
+  unset / "file:..."     → local backend (sqlite opened in place)
   bare path              → local backend at that path
-  "s3://bucket/key.json" → S3 backend  (added in a follow-up commit)
+  "s3://bucket/key.json" → S3 backend (pull bytes / conditional PUT)
 
-CRM_DATA is still honored as a back-compat shortcut for the local
-backend path when CRM_STORAGE is unset.
+A session is `db = open_db()` … `push_db(db)` (after writes) … `close_db(db)`.
+open_db transparently upgrades a legacy JSON blob to SQLite the first time it
+sees one — same S3 key, same If-Match ETag concurrency — so existing users and
+every device migrate with no reconfiguration.
 
-cli.py's --data flag calls use_local_path() to switch backends
-mid-process rather than mutating a global.
-
-Migrations and timezone helpers live here (not in a backend) because
-they operate on the loaded data dict, independently of where it came
-from.
+CRM_DATA is still honored as the local path when CRM_STORAGE is unset. cli.py's
+--data flag calls use_local_path() to switch backends mid-process.
 """
 
-import os
-import sys
+import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+import os
 
+from ..db import Db
 from ..stages import DEFAULT_STAGES, DEFAULT_SOURCES
-from .errors import ConcurrentWriteError, StorageCorrupt
+from .errors import ConcurrentWriteError, StorageCorrupt  # noqa: F401 (re-exported)
 from .local import LocalBackend
 
 
 DEFAULT_DATA_FILE = Path.home() / ".config" / "kitron-crm" / "crm_data.json"
 
+# Highest legacy JSON schema version; consumed once when importing a JSON blob.
 CURRENT_VERSION = 4
+
+# First 16 bytes of every SQLite database file — how we tell a db from JSON.
+SQLITE_MAGIC = b"SQLite format 3\x00"
 
 
 def _build_backend():
     raw = os.environ.get("CRM_STORAGE", "").strip()
     if raw.startswith("s3://"):
-        from .s3 import S3Backend  # lazy: avoids requiring boto3 for local users
+        from .s3 import S3Backend  # lazy: avoids requiring requests for local users
         parsed = urlparse(raw)
         return S3Backend(
             bucket=parsed.netloc,
@@ -55,8 +60,7 @@ _backend = None
 
 def _ensure_backend():
     """Build the backend on first access. Deferred so commands that don't
-    touch storage (--version, help, …) don't pay the boto3 import / S3
-    client init cost when CRM_STORAGE points at s3://."""
+    touch storage (--version, help, …) don't pay the S3 client init cost."""
     global _backend
     if _backend is None:
         _backend = _build_backend()
@@ -75,8 +79,9 @@ def current_backend():
     return _ensure_backend()
 
 
-# --- Migrations ---
-# Key = target version. Only add an entry when the schema actually changes.
+# --- Legacy JSON migrations -------------------------------------------------
+# Applied once, in memory, when importing an old JSON blob into SQLite.
+# Key = target version. Only add an entry when the JSON schema actually changed.
 
 def migrate_to_1(data):
     """Initial schema: ensure config, stages, removed exist. Move top-level timezone to config."""
@@ -141,33 +146,103 @@ MIGRATIONS = {
 }
 
 
-def load_data():
-    try:
-        data = _ensure_backend().load()
-    except StorageCorrupt as e:
-        print(f"Error: {e}")
-        print("Fix the data manually or remove it to start fresh.")
-        sys.exit(1)
-
+def _migrate_json_to_v4(data):
+    """Run the legacy migrations forward so `data` is v4-shaped before import."""
+    if not isinstance(data, dict):
+        data = {"contacts": []}
     version = data.get("version", 0)
-    if version > CURRENT_VERSION:
-        print(f"Warning: data is version {version}, but this crm is version {CURRENT_VERSION}.")
-        print("Update your crm or you may lose data.")
-        sys.exit(1)
-    if version < CURRENT_VERSION:
-        while version < CURRENT_VERSION:
-            version += 1
-            if version in MIGRATIONS:
-                MIGRATIONS[version](data)
-        data["version"] = CURRENT_VERSION
-        save_data(data)
-
+    while version < CURRENT_VERSION:
+        version += 1
+        if version in MIGRATIONS:
+            MIGRATIONS[version](data)
+    data["version"] = CURRENT_VERSION
     return data
 
 
-def save_data(data):
-    _ensure_backend().save(data)
+def _parse_json(blob, where):
+    try:
+        return json.loads(blob)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise StorageCorrupt(f"{where}: {e}") from e
 
+
+# --- Session lifecycle ------------------------------------------------------
+
+class _RemoteSync:
+    """Push handle for a remote-backed session: uploads the local working db
+    file under the same If-Match ETag concurrency as the old JSON blob."""
+
+    def __init__(self, backend, path, etag):
+        self.backend = backend
+        self.path = Path(path)
+        self.etag = etag
+
+    def push(self, db):
+        db.commit()
+        self.etag = self.backend.store(self.path.read_bytes(), self.etag)
+
+    def close(self):
+        try:
+            self.path.unlink()
+            self.path.parent.rmdir()
+        except OSError:
+            pass
+
+
+def _open_local(path):
+    """Open (or create) a local SQLite db, upgrading a legacy JSON file in place."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if p.exists() and p.stat().st_size:
+        with open(p, "rb") as f:
+            head = f.read(16)
+        if head != SQLITE_MAGIC:
+            data = _migrate_json_to_v4(_parse_json(p.read_bytes(), str(p)))
+            p.rename(p.with_suffix(p.suffix + ".jsonbak"))  # keep the original
+            db = Db.open(p)
+            db.import_json(data)
+            return db
+    return Db.open(p)
+
+
+def open_db():
+    """Open a Db bound to the active backend, pulling + upgrading as needed."""
+    backend = _ensure_backend()
+    if not backend.is_remote:
+        db = _open_local(backend.path)
+        db._sync = None
+        return db
+    raw, etag = backend.fetch()
+    tmp = Path(tempfile.mkdtemp(prefix="crm-store-")) / "store.db"
+    db = Db.open(tmp)
+    if raw and raw[:16] == SQLITE_MAGIC:
+        db.close()
+        tmp.write_bytes(raw)
+        db = Db.open(tmp)
+    elif raw:
+        db.import_json(_migrate_json_to_v4(_parse_json(raw, backend.describe())))
+    db._sync = _RemoteSync(backend, tmp, etag)
+    return db
+
+
+def push_db(db):
+    """Persist a session's writes: commit locally, and upload if remote."""
+    sync = getattr(db, "_sync", None)
+    if sync is None:
+        db.commit()
+    else:
+        sync.push(db)
+
+
+def close_db(db):
+    """Close a session and clean up any remote working file."""
+    sync = getattr(db, "_sync", None)
+    db.close()
+    if sync is not None:
+        sync.close()
+
+
+# --- Timezone ---------------------------------------------------------------
 
 def _parse_tz(tz_str):
     """Parse a timezone string like 'UTC+03:00' or 'UTC-05:00' into a timezone object."""
@@ -179,9 +254,10 @@ def _parse_tz(tz_str):
     return timezone(timedelta(hours=sign * int(h), minutes=sign * int(m)))
 
 
-def get_tz(data):
-    cfg = data["config"]
-    tz_str = cfg.get("timezone")
+def get_tz(db):
+    """The configured tz, freezing an auto-detected one on first use so overdue
+    math stays stable if the machine's tz later changes."""
+    tz_str = db.get_config("timezone")
     if not tz_str:
         local_tz = datetime.now().astimezone().tzinfo
         offset = local_tz.utcoffset(datetime.now())
@@ -191,8 +267,7 @@ def get_tz(data):
         hours, remainder = divmod(total, 3600)
         minutes = remainder // 60
         tz_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
-        cfg["timezone"] = tz_str
-        data["config"] = cfg
-        save_data(data)
+        db.set_config("timezone", tz_str)
+        push_db(db)
         print(f"Timezone set to {tz_str}. Change with: crm config timezone UTC+XX:XX")
     return _parse_tz(tz_str)

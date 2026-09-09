@@ -9,14 +9,17 @@ overkill for this codebase.
 Endpoint URL is configurable via CRM_S3_ENDPOINT so the same backend
 works against AWS S3, Backblaze B2, Hetzner, MinIO, RustFS, etc.
 
-Conditional writes via the HTTP If-Match / If-None-Match preconditions:
+The object is the SQLite database file, transported as opaque bytes
+(fetch/store); storage.open_db sniffs SQLite-vs-legacy-JSON and upgrades
+in place. Conditional writes via the HTTP If-Match / If-None-Match
+preconditions:
 
-  - load() captures the object's ETag from the GET response.
-  - save() sends If-Match: <etag> to ensure nothing else wrote in the
+  - fetch() captures the object's ETag from the GET response.
+  - store() sends If-Match: <etag> to ensure nothing else wrote in the
     meantime. On 412 PreconditionFailed, raises ConcurrentWriteError
     so the caller can reload and retry rather than silently
     overwriting another device's changes.
-  - On first run (no existing object), save() sends If-None-Match: *
+  - On first run (no existing object), store() sends If-None-Match: *
     so concurrent first-creates from a second device also produce a
     conflict instead of a last-writer-wins race.
 
@@ -27,13 +30,12 @@ Bucket setup is the user's responsibility. Recommended:
     writes, and gives you a free undo history
 """
 
-import json
 import os
 from configparser import ConfigParser
 from pathlib import Path
 from urllib.parse import quote
 
-from .errors import ConcurrentWriteError, StorageCorrupt
+from .errors import ConcurrentWriteError
 
 
 def _load_credentials():
@@ -66,6 +68,8 @@ def _load_credentials():
 
 
 class S3Backend:
+    is_remote = True
+
     def __init__(self, bucket, key, endpoint_url=None):
         if not bucket:
             raise ValueError(
@@ -111,33 +115,30 @@ class S3Backend:
         # servers require path-style; AWS supports both.
         return f"{self.endpoint_url}/{self.bucket}/{quote(self.key, safe='/')}"
 
-    def load(self):
+    def fetch(self):
+        """Return (bytes, etag) of the stored object, or (None, None) if absent.
+        The bytes are opaque here: storage.open_db sniffs SQLite vs legacy JSON."""
         session, auth = self._connect()
         resp = session.get(self._url(), auth=auth)
         if resp.status_code == 404:
             self._etag = None
-            return {"contacts": []}
+            return None, None
         resp.raise_for_status()
         self._etag = resp.headers.get("ETag")
-        try:
-            data = json.loads(resp.content)
-        except (json.JSONDecodeError, ValueError) as e:
-            raise StorageCorrupt(f"s3://{self.bucket}/{self.key}: {e}") from e
-        if not isinstance(data, dict):
-            return {"contacts": []}
-        return data
+        return resp.content, self._etag
 
-    def save(self, data):
+    def store(self, blob, etag):
+        """Conditionally PUT `blob`. `etag` is the token from fetch() (None on a
+        first create). Raises ConcurrentWriteError on a precondition failure."""
         session, auth = self._connect()
-        body = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        # If we loaded an existing object, require the ETag is still current.
-        # If we haven't (or the object didn't exist), require no object exists yet.
-        if self._etag:
-            headers["If-Match"] = self._etag
+        headers = {"Content-Type": "application/octet-stream"}
+        # Require the object is unchanged since fetch (If-Match), or — if it
+        # didn't exist — that no one else created it first (If-None-Match: *).
+        if etag:
+            headers["If-Match"] = etag
         else:
             headers["If-None-Match"] = "*"
-        resp = session.put(self._url(), data=body, auth=auth, headers=headers)
+        resp = session.put(self._url(), data=blob, auth=auth, headers=headers)
         if resp.status_code == 412:
             raise ConcurrentWriteError(
                 f"data changed remotely at s3://{self.bucket}/{self.key}; "
@@ -145,3 +146,4 @@ class S3Backend:
             )
         resp.raise_for_status()
         self._etag = resp.headers.get("ETag")
+        return self._etag

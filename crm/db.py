@@ -237,7 +237,8 @@ class Db:
         """Insert a contact, seeding the creation note + stage_history entry
         (matching the old add literals). Returns the new contact dict."""
         from .notes import utc_stamp
-        stamp = stamp or utc_stamp()
+        if stamp is None:
+            stamp = utc_stamp()
         vals = {col: str(fields.get(col, "") or "") for col in CONTACT_COLUMNS}
         cols = ",".join(CONTACT_COLUMNS)
         ph = ",".join("?" * len(CONTACT_COLUMNS))
@@ -279,7 +280,7 @@ class Db:
         from .notes import utc_stamp
         cur = self.conn.execute(
             "UPDATE contacts SET removed_at = ? WHERE id = ? AND removed_at IS NULL",
-            (stamp or utc_stamp(), cid))
+            (utc_stamp() if stamp is None else stamp, cid))
         return cur.rowcount > 0
 
     def restore_contact(self, cid):
@@ -291,10 +292,24 @@ class Db:
 
     def add_note(self, cid, text, stamp=None):
         from .notes import utc_stamp
-        stamp = stamp or utc_stamp()
+        if stamp is None:
+            stamp = utc_stamp()
         self.conn.execute("INSERT INTO notes(contact_id, date, text) VALUES(?,?,?)",
                           (cid, stamp, text))
         return {"date": stamp, "text": text}
+
+    def list_notes(self, cid):
+        """A contact's notes newest-first, each carrying its own `id` so callers
+        (the CLI notes viewer) can edit/delete a specific one."""
+        return [{"id": r["id"], "date": r["date"], "text": r["text"]}
+                for r in self.conn.execute(
+                    "SELECT id, date, text FROM notes WHERE contact_id = ? ORDER BY id DESC", (cid,))]
+
+    def edit_note(self, note_id, text):
+        self.conn.execute("UPDATE notes SET text = ? WHERE id = ?", (text, note_id))
+
+    def delete_note(self, note_id):
+        self.conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
 
     # ---------------- stage history ----------------
 
@@ -305,7 +320,7 @@ class Db:
         from .notes import utc_stamp
         self.conn.execute(
             "INSERT INTO stage_history(contact_id, date, from_stage, to_stage) VALUES(?,?,?,?)",
-            (cid, stamp or utc_stamp(), old or "", new))
+            (cid, utc_stamp() if stamp is None else stamp, old or "", new))
 
     # ---------------- one-time JSON import ----------------
 
