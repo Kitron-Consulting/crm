@@ -1,11 +1,21 @@
 """Tests for `crm import` — Sent-folder contact harvesting.
 
-No network: imaplib is faked and load_data/fetch are stubbed.
+No network: imaplib is faked and the mail fetch is stubbed; data lives in a
+temp SQLite backend.
 """
 
 import sys
 
-from crm import cli, mail
+import pytest
+
+from crm import cli, mail, storage
+
+
+@pytest.fixture(autouse=True)
+def _reset_backend():
+    saved = storage._backend
+    yield
+    storage._backend = saved
 
 
 # --- pure helpers -------------------------------------------------------
@@ -118,18 +128,31 @@ def test_fetch_empty_folder(monkeypatch):
 
 # --- cmd_import filtering (dry-run path) --------------------------------
 
-def test_import_filters_existing_own_and_noise(monkeypatch, capsys):
-    data = {
-        "config": {
-            "imap": {"host": "h", "user": "me@kitron.dev"},
-            "smtp": {"user": "me@kitron.dev"},
-            "stages": ["cold", "contacted"], "sources": ["cold", "referral"],
-        },
-        "contacts": [{"name": "Known", "email": "known@x.com", "stage": "cold"}],
-    }
-    monkeypatch.setattr(cli, "load_data", lambda: data)
-    monkeypatch.setattr(cli, "fetch_sent_recipients", lambda cfg, since_days=None: [], raising=False)
-    # Stub the mail import used inside cmd_import
+def _seed(tmp_path, config, contacts=()):
+    storage.use_local_path(tmp_path / "crm.db")
+    db = storage.open_db()
+    for k, v in config.items():
+        db.set_config(k, v)
+    for c in contacts:
+        db.add_contact(c)
+    storage.push_db(db)
+    storage.close_db(db)
+
+
+def _config_after():
+    db = storage.open_db()
+    try:
+        return db.all_config()
+    finally:
+        storage.close_db(db)
+
+
+def test_import_filters_existing_own_and_noise(tmp_path, monkeypatch, capsys):
+    _seed(tmp_path, {
+        "imap": {"host": "h", "user": "me@kitron.dev"},
+        "smtp": {"user": "me@kitron.dev"},
+        "stages": ["cold", "contacted"], "sources": ["cold", "referral"],
+    }, [{"name": "Known", "email": "known@x.com", "stage": "cold"}])
     monkeypatch.setattr(
         "crm.mail.fetch_sent_recipients",
         lambda cfg, since_days=None: [
@@ -150,16 +173,12 @@ def test_import_filters_existing_own_and_noise(monkeypatch, capsys):
     assert "1 new contact" in out
 
 
-def test_import_respects_ignore_list(monkeypatch, capsys):
-    data = {
-        "config": {
-            "imap": {"host": "h", "user": "me@kitron.dev"},
-            "stages": ["cold", "contacted"], "sources": ["cold"],
-            "import_ignore": ["skip@me.com", "@vendor.com"],
-        },
-        "contacts": [],
-    }
-    monkeypatch.setattr(cli, "load_data", lambda: data)
+def test_import_respects_ignore_list(tmp_path, monkeypatch, capsys):
+    _seed(tmp_path, {
+        "imap": {"host": "h", "user": "me@kitron.dev"},
+        "stages": ["cold", "contacted"], "sources": ["cold"],
+        "import_ignore": ["skip@me.com", "@vendor.com"],
+    })
     monkeypatch.setattr(
         "crm.mail.fetch_sent_recipients",
         lambda cfg, since_days=None: [
@@ -178,15 +197,9 @@ def test_import_respects_ignore_list(monkeypatch, capsys):
     assert "1 new contact" in out
 
 
-def test_import_i_choice_persists_to_ignore(monkeypatch):
-    data = {
-        "config": {"imap": {"host": "h", "user": "me@kitron.dev"},
-                   "stages": ["cold", "contacted"], "sources": ["cold"]},
-        "contacts": [],
-    }
-    saved = {}
-    monkeypatch.setattr(cli, "load_data", lambda: data)
-    monkeypatch.setattr(cli, "save_data", lambda d: saved.update(d))
+def test_import_i_choice_persists_to_ignore(tmp_path, monkeypatch):
+    _seed(tmp_path, {"imap": {"host": "h", "user": "me@kitron.dev"},
+                     "stages": ["cold", "contacted"], "sources": ["cold"]})
     monkeypatch.setattr(
         "crm.mail.fetch_sent_recipients",
         lambda cfg, since_days=None: [{"email": "junk@spam.com", "name": "Junk"}],
@@ -195,5 +208,10 @@ def test_import_i_choice_persists_to_ignore(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *a: "i")  # ignore the one candidate
 
     cli.cmd_import([])
-    assert "junk@spam.com" in saved["config"]["import_ignore"]
-    assert saved["contacts"] == []  # nothing added
+    cfg = _config_after()
+    assert "junk@spam.com" in cfg["import_ignore"]
+    db = storage.open_db()
+    try:
+        assert db.list_contacts() == []  # nothing added
+    finally:
+        storage.close_db(db)

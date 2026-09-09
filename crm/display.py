@@ -22,7 +22,6 @@ os.environ.setdefault("ESCDELAY", "25")
 
 from .contacts import find_contact, _contact_filter
 from .due import relative_date
-from .stages import get_stages
 from .storage import get_tz
 
 
@@ -55,14 +54,14 @@ def stage_color(stage, stages):
     return STAGE_COLOR_CYCLE[idx % len(STAGE_COLOR_CYCLE)]
 
 
-def display_stamp(stamp, data):
+def display_stamp(stamp, db):
     """Convert a UTC timestamp to local time for display."""
     if not stamp or len(stamp) <= 10:  # date-only or empty
         return stamp
     try:
         dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
         dt = dt.replace(tzinfo=timezone.utc)
-        local_dt = dt.astimezone(get_tz(data))
+        local_dt = dt.astimezone(get_tz(db))
         return local_dt.strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return stamp
@@ -668,34 +667,35 @@ def format_contact_option(c, stages=None):
     return f"{BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{role_str}{DIM}){RESET} {sc}[{s.upper()}]{RESET}"
 
 
-def pick_contact_from_all(data, prompt="Select contact"):
-    """Pick any contact interactively."""
-    stages = get_stages(data)
+def pick_contact_from_all(db, prompt="Select contact"):
+    """Pick any active contact interactively."""
+    stages = db.stages()
     order = {s: i for i, s in enumerate(stages)}
-    contacts = sorted(data["contacts"], key=lambda c: (order.get(c["stage"], 99), c["name"]))
+    contacts = sorted(db.list_contacts(), key=lambda c: (order.get(c["stage"], 99), c["name"]))
     fmt = lambda c: format_contact_option(c, stages)
     return pick_one(contacts, prompt=prompt, format_fn=fmt, filter_fn=_contact_filter)
 
 
-def pick_contact_from_matches(data, matches):
+def pick_contact_from_matches(db, matches):
     """Pick from search results."""
     if len(matches) == 1:
         return matches[0]
-    stages = get_stages(data)
+    stages = db.stages()
     fmt = lambda c: format_contact_option(c, stages)
     return pick_one(matches, prompt=f"Multiple matches ({len(matches)})", format_fn=fmt, filter_fn=_contact_filter)
 
 
-def get_contact(data, query=None, prompt="Select contact"):
-    """Get a contact - by query if provided, or interactive picker."""
+def get_contact(db, query=None, prompt="Select contact"):
+    """Get an active contact — by query if provided, else interactive picker.
+    Returns a DAL contact dict (with its stable `id`), or None."""
     if query:
-        matches = find_contact(data, query)
+        matches = find_contact(db.list_contacts(), query)
         if not matches:
             print(f"No contacts matching '{query}'")
             return None
-        return pick_contact_from_matches(data, matches)
+        return pick_contact_from_matches(db, matches)
     else:
-        return pick_contact_from_all(data, prompt)
+        return pick_contact_from_all(db, prompt)
 
 
 def format_contact_line(c, stages=None, today=None):

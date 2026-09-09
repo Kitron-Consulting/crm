@@ -52,14 +52,6 @@ def _imap_mailbox(name):
     return name
 
 
-def get_templates(data):
-    return data.get("config", {}).get("templates", {})
-
-
-def get_smtp_config(data):
-    return data.get("config", {}).get("smtp")
-
-
 def contact_context(c):
     """Build substitution context for a contact."""
     name = c.get("name", "")

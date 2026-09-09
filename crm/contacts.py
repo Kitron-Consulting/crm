@@ -18,11 +18,12 @@ when tests land.
 """
 
 
-def find_contact(data, query):
-    """Substring match on name/company/email. Case-insensitive."""
+def find_contact(contacts, query):
+    """Substring match on name/company/email. Case-insensitive.
+    `contacts` is a list of contact dicts (e.g. db.list_contacts())."""
     query = query.lower()
     matches = []
-    for c in data["contacts"]:
+    for c in contacts:
         if query in c["name"].lower() or query in c["company"].lower() or query in c["email"].lower():
             matches.append(c)
     return matches

@@ -38,9 +38,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from .display import display_stamp
-from .notes import add_note, utc_stamp
-from .stages import get_sources, get_stages, record_stage_change, stage_segments
-from .storage import current_backend, get_tz, load_data, save_data
+from .stages import stage_segments
+from .storage import current_backend, get_tz, open_db, push_db, close_db
 from .storage.errors import ConcurrentWriteError
 # The Svelte UI (web/, built with Vite + vite-plugin-singlefile) compiles to
 # this single self-contained file. It's gitignored build output, shipped in the
@@ -91,45 +90,42 @@ INLINE_TYPES = {"application/pdf", "image/png", "image/jpeg", "image/gif",
 
 # --- Helpers --------------------------------------------------------------
 
-def _today(data):
+def _today(db):
     """Today's date in the user's configured tz — same as the CLI's overdue math."""
-    return datetime.now(get_tz(data)).strftime("%Y-%m-%d")
+    return datetime.now(get_tz(db)).strftime("%Y-%m-%d")
 
 
-def _serialize_contact(data, idx, c):
-    """JSON-ready copy of a contact: adds `id` and converts note stamps to
-    local time (like `display_stamp`). Does not mutate the stored contact."""
+def _serialize_contact(db, c):
+    """JSON-ready copy of a DAL contact: converts note/stage stamps to local
+    time (like `display_stamp`) and adds derived `segments`. `c` already carries
+    its stable `id`, `notes` and `stage_history`."""
     out = dict(c)
-    out["id"] = idx
     out["notes"] = [
-        {**n, "date": display_stamp(n.get("date", ""), data)}
+        {**n, "date": display_stamp(n.get("date", ""), db)}
         for n in c.get("notes", [])
     ]
     out["stage_history"] = [
-        {**e, "date": display_stamp(e.get("date", ""), data)}
+        {**e, "date": display_stamp(e.get("date", ""), db)}
         for e in c.get("stage_history", [])
     ]
     # Timeline bars, derived from the localised copy so day boundaries are local.
-    out["segments"] = stage_segments(out, _today(data))
+    out["segments"] = stage_segments(out, _today(db))
     return out
 
 
-def _get_contact(data, body):
-    """Resolve {id, name} from a mutation body to (idx, contact).
+def _get_contact(db, body):
+    """Resolve {id, name} from a mutation body to a DAL contact dict.
 
-    Raises StaleError unless 0 <= id < len(contacts) and the name matches —
-    guards against a stale index after another client added/removed contacts.
-    """
-    contacts = data.get("contacts", [])
-    idx = body.get("id")
-    if isinstance(idx, bool) or not isinstance(idx, int):
+    Raises StaleError if the id is gone or the name no longer matches — guards
+    against acting on a contact another client renamed or removed. Ids are now
+    stable PKs, so a stale *position* can no longer point at the wrong contact."""
+    cid = body.get("id")
+    if isinstance(cid, bool) or not isinstance(cid, int):
         raise StaleError(STALE_MESSAGE)
-    if not 0 <= idx < len(contacts):
+    c = db.get_contact(cid)
+    if c is None or c.get("removed_at") is not None or c.get("name") != body.get("name"):
         raise StaleError(STALE_MESSAGE)
-    c = contacts[idx]
-    if c.get("name") != body.get("name"):
-        raise StaleError(STALE_MESSAGE)
-    return idx, c
+    return c
 
 
 def _resolve_date(s, tz):
@@ -169,19 +165,18 @@ def _str(v):
 
 # --- API logic (no HTTP; unit-testable) ---------------------------------
 
-def build_state(data):
+def build_state(db):
     """Snapshot the board needs: contacts (with ids + local note dates),
     the stage/source vocabularies, and today's date in the user's tz."""
     return {
-        "contacts": [_serialize_contact(data, i, c)
-                     for i, c in enumerate(data.get("contacts", []))],
-        "stages": get_stages(data),
-        "sources": get_sources(data),
-        "today": _today(data),
+        "contacts": [_serialize_contact(db, c) for c in db.list_contacts()],
+        "stages": db.stages(),
+        "sources": db.sources(),
+        "today": _today(db),
     }
 
 
-def api_add_contact(data, body):
+def api_add_contact(db, body):
     """Create a contact like `cmd_add` (non-interactive mode).
 
     body = {"fields": {name, email, phone, company, role, source, stage}}.
@@ -189,48 +184,33 @@ def api_add_contact(data, body):
     "cold" and must be in the vocabulary. Adds the "Added to CRM" note.
     """
     fields = body.get("fields") or {}
-    stages = get_stages(data)
-    sources = get_sources(data)
-
     name = _str(fields.get("name")).strip()
     if not name:
         raise ValueError("Name is required.")
     email = _str(fields.get("email")).strip()
     _validate_email(email)
     source = _str(fields.get("source")).strip() or "cold"
-    _validate_source(source, sources)
+    _validate_source(source, db.sources())
     stage = _str(fields.get("stage")).strip() or "cold"
-    _validate_stage(stage, stages)
+    _validate_stage(stage, db.stages())
 
-    contact = {
-        "name": name,
-        "email": email,
-        "phone": _str(fields.get("phone")),
-        "company": _str(fields.get("company")),
-        "role": _str(fields.get("role")),
-        "source": source,
-        "stage": stage,
-        "next_action": "",
-        "next_date": "",
-        "notes": [{"date": utc_stamp(), "text": "Added to CRM"}],
-        "stage_history": [{"date": utc_stamp(), "from": "", "to": stage}],
-    }
-    contacts = data.setdefault("contacts", [])
-    contacts.append(contact)
-    return {"contact": _serialize_contact(data, len(contacts) - 1, contact)}
+    contact = db.add_contact({
+        "name": name, "email": email, "phone": _str(fields.get("phone")),
+        "company": _str(fields.get("company")), "role": _str(fields.get("role")),
+        "source": source, "stage": stage,
+    })
+    return {"contact": _serialize_contact(db, contact)}
 
 
-def api_update_contact(data, body):
+def api_update_contact(db, body):
     """Update editable fields like `cmd_edit --flag value`; a stage change
     additionally records the `cmd_stage` note ("Stage: old → new").
 
     body = {"id", "name", "fields": {subset of CONTACT_FIELDS}}. Unknown
     keys are ignored. Validation happens before any field is written.
     """
-    idx, c = _get_contact(data, body)
+    c = _get_contact(db, body)
     fields = body.get("fields") or {}
-    stages = get_stages(data)
-    sources = get_sources(data)
 
     updates = {}
     for key in CONTACT_FIELDS:
@@ -244,74 +224,69 @@ def api_update_contact(data, body):
         if key == "email":
             _validate_email(val)
         if key == "stage":
-            _validate_stage(val, stages)
+            _validate_stage(val, db.stages())
         if key == "source":
-            _validate_source(val, sources)
+            _validate_source(val, db.sources())
         updates[key] = val
 
     old_stage = c.get("stage")
-    c.update(updates)
-    new_stage = c.get("stage")
+    db.update_contact(c["id"], updates)
+    new_stage = updates.get("stage", old_stage)
     if "stage" in updates and new_stage != old_stage:
-        add_note(c, f"Stage: {old_stage} → {new_stage}")
-        record_stage_change(c, old_stage, new_stage, utc_stamp())
+        db.add_note(c["id"], f"Stage: {old_stage} → {new_stage}")
+        db.record_stage_change(c["id"], old_stage, new_stage)
 
-    return {"contact": _serialize_contact(data, idx, c)}
+    return {"contact": _serialize_contact(db, db.get_contact(c["id"]))}
 
 
-def api_add_note(data, body):
+def api_add_note(db, body):
     """Prepend a timestamped note like `cmd_note`. body = {"id", "name", "text"}."""
-    idx, c = _get_contact(data, body)
+    c = _get_contact(db, body)
     text = _str(body.get("text")).strip()
     if not text:
         raise ValueError("Note text is required.")
-    add_note(c, text)
-    return {"contact": _serialize_contact(data, idx, c)}
+    db.add_note(c["id"], text)
+    return {"contact": _serialize_contact(db, db.get_contact(c["id"]))}
 
 
-def api_set_next(data, body):
+def api_set_next(db, body):
     """Set next action + due date like `cmd_next`.
 
     body = {"id", "name", "action", "date"}; `date` is "YYYY-MM-DD" or a
     relative "+Nd" (resolved against today in the user's tz). Both required.
     """
-    idx, c = _get_contact(data, body)
+    c = _get_contact(db, body)
     action = _str(body.get("action")).strip()
     if not action:
         raise ValueError("Action is required.")
     date = _str(body.get("date")).strip()
     if not date:
         raise ValueError("Due date is required. Use YYYY-MM-DD or +Nd")
-    parsed = _resolve_date(date, get_tz(data))
-    c["next_action"] = action
-    c["next_date"] = parsed
-    return {"contact": _serialize_contact(data, idx, c)}
+    parsed = _resolve_date(date, get_tz(db))
+    db.set_next(c["id"], action, parsed)
+    return {"contact": _serialize_contact(db, db.get_contact(c["id"]))}
 
 
-def api_done(data, body):
+def api_done(db, body):
     """Complete the pending action like `cmd_done`: note "Done: <action>"
     and clear next_action/next_date. No pending action → ValueError (400)."""
-    idx, c = _get_contact(data, body)
+    c = _get_contact(db, body)
     action = c.get("next_action", "")
     if not action:
         raise ValueError(f"No action set for {c['name']}.")
-    add_note(c, f"Done: {action}")
-    c["next_action"] = ""
-    c["next_date"] = ""
-    return {"contact": _serialize_contact(data, idx, c)}
+    db.add_note(c["id"], f"Done: {action}")
+    db.clear_next(c["id"])
+    return {"contact": _serialize_contact(db, db.get_contact(c["id"]))}
 
 
-def api_remove_contact(data, body):
-    """Soft-delete like `cmd_rm contact -y`: move to data["removed"] with a
-    `removed_at` UTC stamp. body = {"id", "name"}."""
-    idx, c = _get_contact(data, body)
-    data["contacts"].pop(idx)
-    c["removed_at"] = utc_stamp()
-    data.setdefault("removed", []).append(c)
+def api_remove_contact(db, body):
+    """Soft-delete like `cmd_rm contact -y`: set removed_at. body = {"id", "name"}."""
+    c = _get_contact(db, body)
+    db.remove_contact(c["id"])
     return {"ok": True}
 
 
-def api_thread(data, email):
+def api_thread(db, email):
     """Recent email exchange with `email` via IMAP (newest first), as JSON-
     ready dicts (the non-serializable `dt` is dropped).
 
@@ -320,17 +295,17 @@ def api_thread(data, email):
     """
     from . import mail
 
-    imap_cfg = data.get("config", {}).get("imap")
+    imap_cfg = db.imap()
     if not imap_cfg:
         raise RuntimeError("IMAP not configured — add config.imap to view threads.")
     email = _str(email).strip()
     if not email:
         raise ValueError("email is required.")
-    messages = mail.fetch_thread(imap_cfg, email, tz=get_tz(data))
+    messages = mail.fetch_thread(imap_cfg, email, tz=get_tz(db))
     return {"messages": [{k: m.get(k) for k in THREAD_MESSAGE_KEYS} for m in messages]}
 
 
-def api_attachment(data, folder, uid, part):
+def api_attachment(db, folder, uid, part):
     """Fetch one attachment part; returns (bytes, content_type, filename).
 
     ValueError on bad params (400), RuntimeError when IMAP isn't configured
@@ -338,7 +313,7 @@ def api_attachment(data, folder, uid, part):
     """
     from . import mail
 
-    imap_cfg = data.get("config", {}).get("imap")
+    imap_cfg = db.imap()
     if not imap_cfg:
         raise RuntimeError("IMAP not configured — add config.imap to download attachments.")
     folder, uid, part = _str(folder).strip(), _str(uid).strip(), _str(part).strip()
@@ -349,7 +324,7 @@ def api_attachment(data, folder, uid, part):
     return mail.fetch_attachment(imap_cfg, folder, uid, part)
 
 
-def api_scan(data, days):
+def api_scan(db, days):
     """Return importable candidates from the Sent folder.
 
     Raises RuntimeError with a friendly message when IMAP isn't configured.
@@ -357,22 +332,22 @@ def api_scan(data, days):
     from . import mail
     from .cli import import_candidates
 
-    imap_cfg = data.get("config", {}).get("imap")
+    imap_cfg = db.imap()
     if not imap_cfg:
         raise RuntimeError("IMAP not configured — add config.imap to use import.")
     recipients = mail.fetch_sent_recipients(imap_cfg, since_days=days)
-    return {"candidates": import_candidates(data, recipients)}
+    return {"candidates": import_candidates(db, recipients)}
 
 
-def api_commit(data, body):
-    """Apply an import commit to `data` (caller persists).
+def api_commit(db, body):
+    """Apply an import commit.
 
     body = {"add": [contact-like dicts], "ignore": [email, ...]}. Contacts are
-    appended with an import note; ignore entries are merged (lowercased) into
+    inserted with an import note; ignore entries are merged (lowercased) into
     config.import_ignore. Returns a summary dict.
     """
-    stages = get_stages(data)
-    sources = get_sources(data)
+    stages = db.stages()
+    sources = db.sources()
     added = 0
     for c in body.get("add", []):
         email = (c.get("email") or "").strip()
@@ -381,24 +356,22 @@ def api_commit(data, body):
             continue
         stage = c.get("stage") if c.get("stage") in stages else "contacted"
         source = c.get("source") if c.get("source") in sources else "cold"
-        data["contacts"].append({
+        db.add_contact({
             "name": name, "email": email, "phone": c.get("phone", ""),
             "company": c.get("company", ""), "role": c.get("role", ""),
             "source": source, "stage": stage,
-            "next_action": "", "next_date": "",
-            "notes": [{"date": utc_stamp(), "text": "Imported from sent mail"}],
-            "stage_history": [{"date": utc_stamp(), "from": "", "to": stage}],
-        })
+        }, note_text="Imported from sent mail")
         added += 1
 
     ignored = 0
     if body.get("ignore"):
-        lst = data.setdefault("config", {}).setdefault("import_ignore", [])
+        lst = db.get_config("import_ignore", [])
         for em in body["ignore"]:
             em = (em or "").strip().lower()
             if em and em not in lst:
                 lst.append(em)
                 ignored += 1
+        db.set_config("import_ignore", lst)
 
     return {"added": added, "ignored": ignored}
 
@@ -497,22 +470,23 @@ class _Handler(BaseHTTPRequestHandler):
         self._handle_api_post(parsed.path, body)
 
     def _handle_api_get(self, path, query):
+        db = None
         try:
+            db = open_db()
             if path == "/api/state":
-                self._send(200, build_state(load_data()))
+                self._send(200, build_state(db))
             elif path == "/api/thread":
-                email = query.get("email", [""])[0]
-                self._send(200, api_thread(load_data(), email))
+                self._send(200, api_thread(db, query.get("email", [""])[0]))
             elif path == "/api/attachment":
                 blob, ctype, name = api_attachment(
-                    load_data(), query.get("folder", [""])[0],
+                    db, query.get("folder", [""])[0],
                     query.get("uid", [""])[0], query.get("part", [""])[0])
                 self._send_file(blob, ctype, name,
                                 force_download=query.get("download", [""])[0] in ("1", "true"))
             elif path == "/api/import/scan":
                 days = query.get("days", [None])[0]
                 days = int(days) if days else None
-                self._send(200, api_scan(load_data(), days))
+                self._send(200, api_scan(db, days))
             else:
                 self._send(404, {"error": "not found"})
         except (ValueError, RuntimeError) as e:
@@ -521,16 +495,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": str(e)})
         except Exception as e:  # surface, don't crash the server
             self._send(500, {"error": str(e)})
+        finally:
+            if db is not None:
+                close_db(db)
 
     def _handle_api_post(self, path, body):
         fn = _MUTATIONS.get(path)
         if fn is None:
             self._send(404, {"error": "not found"})
             return
+        db = None
         try:
-            data = load_data()
-            result = fn(data, body)
-            save_data(data)
+            db = open_db()
+            result = fn(db, body)
+            push_db(db)
             self._send(200, result)
         except StaleError as e:
             self._send(409, {"error": str(e)})
@@ -540,6 +518,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": str(e)})
         except Exception as e:
             self._send(500, {"error": str(e)})
+        finally:
+            if db is not None:
+                close_db(db)
 
 
 def run(args):

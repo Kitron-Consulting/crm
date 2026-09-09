@@ -115,11 +115,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import storage
-from .stages import DEFAULT_STAGES, DEFAULT_SOURCES, get_stages, get_sources, record_stage_change
-from .storage import load_data, save_data, get_tz, CURRENT_VERSION, MIGRATIONS, ConcurrentWriteError, _parse_tz
+from .storage import get_tz, ConcurrentWriteError, _parse_tz
 from .due import parse_date, relative_date, bucket_due
-from .notes import utc_stamp, add_note, edit_note, delete_note
-from .contacts import find_contact, _contact_filter, search_contacts
+from .contacts import _contact_filter, search_contacts
 from .display import (
     BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, RESET,
     STAGE_COLOR_CYCLE, STAGE_COLOR_SPECIAL, stage_color,
@@ -138,42 +136,42 @@ def cmd_list(args):
     if len(args) > 1:
         print("Usage: crm list [STAGE]")
         return
-    data = load_data()
-    filter_stage = args[0].lower() if args else None
-    
-    contacts = data["contacts"]
-    if filter_stage:
-        contacts = [c for c in contacts if c["stage"].lower() == filter_stage]
-    
-    by_stage = {}
-    for c in contacts:
-        stage = c["stage"]
-        if stage not in by_stage:
-            by_stage[stage] = []
-        by_stage[stage].append(c)
-    
-    stages = get_stages(data)
-    tz = get_tz(data)
-    today = datetime.now(tz).strftime("%Y-%m-%d")
+    db = storage.open_db()
+    try:
+        filter_stage = args[0].lower() if args else None
 
-    # Pipeline summary
-    total = len(contacts)
-    if total:
-        parts = []
+        contacts = db.list_contacts()
+        if filter_stage:
+            contacts = [c for c in contacts if c["stage"].lower() == filter_stage]
+
+        by_stage = {}
+        for c in contacts:
+            by_stage.setdefault(c["stage"], []).append(c)
+
+        stages = db.stages()
+        tz = get_tz(db)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+
+        # Pipeline summary
+        total = len(contacts)
+        if total:
+            parts = []
+            for stage in stages:
+                count = len(by_stage.get(stage, []))
+                if count:
+                    sc = stage_color(stage, stages)
+                    parts.append(f"{sc}{stage} {BOLD}{count}{RESET}")
+            print(f"\n{DIM}Pipeline:{RESET} {f' {DIM}·{RESET} '.join(parts)} {DIM}({total} total){RESET}")
+
         for stage in stages:
-            count = len(by_stage.get(stage, []))
-            if count:
+            if stage in by_stage:
                 sc = stage_color(stage, stages)
-                parts.append(f"{sc}{stage} {BOLD}{count}{RESET}")
-        print(f"\n{DIM}Pipeline:{RESET} {f' {DIM}·{RESET} '.join(parts)} {DIM}({total} total){RESET}")
-
-    for stage in stages:
-        if stage in by_stage:
-            sc = stage_color(stage, stages)
-            print(f"\n{sc}{BOLD}{stage.upper()}{RESET} ({len(by_stage[stage])})")
-            for c in sorted(by_stage[stage], key=lambda x: x.get("next_date") or "z"):
-                print(format_contact_line(c, stages, today))
-    print()
+                print(f"\n{sc}{BOLD}{stage.upper()}{RESET} ({len(by_stage[stage])})")
+                for c in sorted(by_stage[stage], key=lambda x: x.get("next_date") or "z"):
+                    print(format_contact_line(c, stages, today))
+        print()
+    finally:
+        storage.close_db(db)
 
 def cmd_show(args):
     full = "--full" in args
@@ -181,91 +179,102 @@ def cmd_show(args):
     if len(args) > 1:
         print("Usage: crm show [QUERY] [--full]")
         return
-    data = load_data()
-    c = get_contact(data, args[0] if args else None, "Show which contact?")
-    if not c:
-        return
-    
-    stages = get_stages(data)
-    sc = stage_color(c['stage'], stages)
-    print(f"\n{DIM}{'='*50}{RESET}")
-    print(f"{BOLD}{c['name']}{RESET} {DIM}—{RESET} {c['company']}")
-    print(f"{DIM}{'='*50}{RESET}")
-    print(f"  {DIM}Email:{RESET}   {CYAN}{c['email']}{RESET}")
-    print(f"  {DIM}Phone:{RESET}   {CYAN}{c.get('phone', '')}{RESET}")
-    print(f"  {DIM}Role:{RESET}    {c.get('role', '')}")
-    print(f"  {DIM}Source:{RESET}  {BOLD}{c.get('source', '').upper()}{RESET}")
-    print(f"  {DIM}Stage:{RESET}   {sc}{BOLD}{c['stage'].upper()}{RESET}")
-    tz = get_tz(data)
-    today = datetime.now(tz).strftime("%Y-%m-%d")
-    next_date = c.get('next_date', '')
-    next_action = c.get('next_action', '')
-    if next_date and next_action:
-        rel = relative_date(next_date, today)
-        overdue = next_date < today
-        dc = RED if overdue else GREEN
-        print(f"  {DIM}Next:{RESET}    {dc}{rel}{RESET} {DIM}—{RESET} {next_action}")
-    else:
-        print(f"  {DIM}Next:{RESET}    {DIM}none{RESET}")
-    notes = c.get("notes", [])
+    db = storage.open_db()
     try:
-        term_w = os.get_terminal_size().columns
-    except OSError:
-        term_w = 80
-    max_text = term_w - 24  # room for indent + date prefix
+        c = get_contact(db, args[0] if args else None, "Show which contact?")
+        if not c:
+            return
 
-    print(f"\n  {BOLD}Notes ({len(notes)}):{RESET}")
-    for note in notes:
-        text = note['text']
-        ds = display_stamp(note['date'], data)
-        if full:
-            print(f"    {DIM}[{ds}]{RESET} {text}")
+        stages = db.stages()
+        sc = stage_color(c['stage'], stages)
+        print(f"\n{DIM}{'='*50}{RESET}")
+        print(f"{BOLD}{c['name']}{RESET} {DIM}—{RESET} {c['company']}")
+        print(f"{DIM}{'='*50}{RESET}")
+        print(f"  {DIM}Email:{RESET}   {CYAN}{c['email']}{RESET}")
+        print(f"  {DIM}Phone:{RESET}   {CYAN}{c.get('phone', '')}{RESET}")
+        print(f"  {DIM}Role:{RESET}    {c.get('role', '')}")
+        print(f"  {DIM}Source:{RESET}  {BOLD}{c.get('source', '').upper()}{RESET}")
+        print(f"  {DIM}Stage:{RESET}   {sc}{BOLD}{c['stage'].upper()}{RESET}")
+        tz = get_tz(db)
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        next_date = c.get('next_date', '')
+        next_action = c.get('next_action', '')
+        if next_date and next_action:
+            rel = relative_date(next_date, today)
+            overdue = next_date < today
+            dc = RED if overdue else GREEN
+            print(f"  {DIM}Next:{RESET}    {dc}{rel}{RESET} {DIM}—{RESET} {next_action}")
         else:
-            truncated = text[:max_text] + "..." if len(text) > max_text else text
-            print(f"    {DIM}[{ds}]{RESET} {truncated}")
-    print()
+            print(f"  {DIM}Next:{RESET}    {DIM}none{RESET}")
+        notes = c.get("notes", [])
+        try:
+            term_w = os.get_terminal_size().columns
+        except OSError:
+            term_w = 80
+        max_text = term_w - 24  # room for indent + date prefix
 
-    if not full and any(len(n['text']) > max_text for n in notes):
-        print(f"  {DIM}Use --full to see complete notes{RESET}\n")
+        print(f"\n  {BOLD}Notes ({len(notes)}):{RESET}")
+        for note in notes:
+            text = note['text']
+            ds = display_stamp(note['date'], db)
+            if full:
+                print(f"    {DIM}[{ds}]{RESET} {text}")
+            else:
+                truncated = text[:max_text] + "..." if len(text) > max_text else text
+                print(f"    {DIM}[{ds}]{RESET} {truncated}")
+        print()
+
+        if not full and any(len(n['text']) > max_text for n in notes):
+            print(f"  {DIM}Use --full to see complete notes{RESET}\n")
+    finally:
+        storage.close_db(db)
 
 def cmd_note(args):
     if len(args) > 2:
         print("Usage: crm note [QUERY] \"[TEXT]\"")
         print("  Multi-word text must be quoted: crm note acme \"Called, no answer\"")
         return
-    data = load_data()
+    db = storage.open_db()
+    try:
+        if args:
+            c = get_contact(db, args[0], "Add note to which contact?")
+            note_text = args[1] if len(args) > 1 else None
+        else:
+            c = get_contact(db, None, "Add note to which contact?")
+            note_text = None
 
-    if args:
-        c = get_contact(data, args[0], "Add note to which contact?")
-        note_text = args[1] if len(args) > 1 else None
-    else:
-        c = get_contact(data, None, "Add note to which contact?")
-        note_text = None
-    
-    if not c:
-        return
-
-    if not note_text:
-        note_text = edit_text(header=f"Add note to {c['name']}")
-        if not note_text:
-            print(f"  {DIM}Cancelled.{RESET}")
+        if not c:
             return
 
-    add_note(c, note_text)
+        if not note_text:
+            note_text = edit_text(header=f"Add note to {c['name']}")
+            if not note_text:
+                print(f"  {DIM}Cancelled.{RESET}")
+                return
 
-    save_data(data)
-    print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
+        db.add_note(c["id"], note_text)
+        storage.push_db(db)
+        print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_notes(args):
     if len(args) > 1:
         print("Usage: crm notes [QUERY]")
         return
-    data = load_data()
-    c = get_contact(data, args[0] if args else None, "View notes for which contact?")
+    db = storage.open_db()
+    try:
+        _notes_interactive(db, args)
+    finally:
+        storage.close_db(db)
+
+
+def _notes_interactive(db, args):
+    c = get_contact(db, args[0] if args else None, "View notes for which contact?")
     if not c:
         return
 
-    notes = c.get("notes", [])
+    notes = db.list_notes(c["id"])
     if not notes:
         print(f"  {DIM}No notes for {c['name']}.{RESET}")
         return
@@ -284,7 +293,7 @@ def cmd_notes(args):
         truncated = first_line[:max_text] + "..." if len(first_line) > max_text else first_line
         multiline = "\n" in note['text']
         suffix = f" {DIM}[+]{RESET}" if multiline else ""
-        print(f"  {DIM}[{display_stamp(note['date'], data)}]{RESET} {truncated}{suffix}")
+        print(f"  {DIM}[{display_stamp(note['date'], db)}]{RESET} {truncated}{suffix}")
     print()
 
     if not sys.stdin.isatty():
@@ -328,7 +337,7 @@ def cmd_notes(args):
             for i in range(min(len(notes), list_h - 2)):
                 note = notes[i]
                 first_line = note['text'].split('\n')[0]
-                date_prefix = f"[{display_stamp(note['date'], data)}] "
+                date_prefix = f"[{display_stamp(note['date'], db)}] "
                 avail = w - 6 - len(date_prefix)
                 truncated = first_line[:avail] + "..." if len(first_line) > avail or '\n' in note['text'] else first_line
                 if i == cursor:
@@ -358,7 +367,7 @@ def cmd_notes(args):
                 preview_h = h - preview_start - 2
                 if preview_h > 0 and preview_start < h:
                     try:
-                        stdscr.addstr(preview_start, 2, f"[{display_stamp(selected['date'], data)}]", curses.A_DIM)
+                        stdscr.addstr(preview_start, 2, f"[{display_stamp(selected['date'], db)}]", curses.A_DIM)
                     except curses.error:
                         pass
                     # Word-wrap the note text, respecting newlines
@@ -435,29 +444,25 @@ def cmd_notes(args):
         text = edit_text(header=f"Add note to {c['name']}")
         if not text:
             return
-        add_note(c, text)
-        save_data(data)
+        db.add_note(c["id"], text)
+        storage.push_db(db)
         print(f"{GREEN}Added note to {BOLD}{c['name']}{RESET}")
 
     elif action == "edit":
-        text = edit_text(initial=note["text"], header=f"Edit note from {display_stamp(note['date'], data)}")
+        text = edit_text(initial=note["text"], header=f"Edit note from {display_stamp(note['date'], db)}")
         if not text:
             return
-        edit_note(note, text)
-        save_data(data)
+        db.edit_note(note["id"], text)
+        storage.push_db(db)
         print(f"{GREEN}Updated note{RESET}")
 
     elif action == "delete":
-        if prompt_confirm(f"Delete note from {display_stamp(note['date'], data)}?"):
-            delete_note(notes, note)
-            save_data(data)
+        if prompt_confirm(f"Delete note from {display_stamp(note['date'], db)}?"):
+            db.delete_note(note["id"])
+            storage.push_db(db)
             print(f"{YELLOW}Deleted note{RESET}")
 
 def cmd_followup(args):
-    from .mail import (
-        get_templates, get_smtp_config, contact_context, render_template,
-        build_message, send_email, save_to_sent, fetch_thread,
-    )
     # Parse flags
     dry_run = "--dry-run" in args
     no_context = "--no-context" in args
@@ -480,13 +485,24 @@ def cmd_followup(args):
             print(f"Unknown arg: {args[i]}")
             return
 
-    data = load_data()
-    templates = get_templates(data)
+    db = storage.open_db()
+    try:
+        _followup(db, query, template_name, override_to, dry_run, no_context)
+    finally:
+        storage.close_db(db)
+
+
+def _followup(db, query, template_name, override_to, dry_run, no_context):
+    from .mail import (
+        contact_context, render_template,
+        build_message, send_email, save_to_sent, fetch_thread,
+    )
+    templates = db.templates()
     if not templates:
         print(f"{RED}No templates configured.{RESET} Add one with: crm add template <name>")
         return
 
-    c = get_contact(data, query, "Send follow-up to which contact?")
+    c = get_contact(db, query, "Send follow-up to which contact?")
     if not c:
         return
 
@@ -495,13 +511,13 @@ def cmd_followup(args):
         return
 
     # Fetch email context if IMAP configured
-    imap_cfg = data.get("config", {}).get("imap")
+    imap_cfg = db.imap()
     context_lines = []
     recent_messages = []
     if imap_cfg and not no_context and sys.stdin.isatty():
         print(f"{DIM}Fetching recent messages...{RESET}")
         try:
-            messages = fetch_thread(imap_cfg, c["email"], tz=get_tz(data))
+            messages = fetch_thread(imap_cfg, c["email"], tz=get_tz(db))
         except Exception as e:
             print(f"{YELLOW}Warning: couldn't fetch thread: {e}{RESET}")
             messages = []
@@ -613,7 +629,7 @@ def cmd_followup(args):
         print(f"\n{YELLOW}Dry run — email not sent.{RESET}")
         return
 
-    smtp_cfg = get_smtp_config(data)
+    smtp_cfg = db.smtp()
     if not smtp_cfg:
         print(f"{RED}SMTP not configured. Set it in config.{RESET}")
         return
@@ -633,7 +649,7 @@ def cmd_followup(args):
     # Save to IMAP Sent folder if configured. Exchange Online (oauth-ms)
     # auto-saves SMTP-submitted mail to Sent Items, so appending again would
     # create a duplicate — skip it for that path.
-    imap_cfg = data.get("config", {}).get("imap")
+    imap_cfg = db.imap()
     if imap_cfg and imap_cfg.get("auth") != "oauth-ms":
         try:
             save_to_sent(imap_cfg, msg)
@@ -641,23 +657,19 @@ def cmd_followup(args):
             print(f"{YELLOW}Warning: sent, but couldn't save to IMAP Sent folder: {e}{RESET}")
 
     # Log as note
-    stamp = utc_stamp()
-    if "notes" not in c:
-        c["notes"] = []
     note_text = f"Sent email: {subject}"
     if override_to:
         note_text += f" (to {override_to})"
-    c["notes"].insert(0, {"date": stamp, "text": note_text})
+    db.add_note(c["id"], note_text)
 
     # Optionally set next action
     if prompt_confirm("Set follow-up reminder?", default=True):
-        tz = get_tz(data)
+        tz = get_tz(db)
         date = (datetime.now(tz) + timedelta(days=7)).strftime("%Y-%m-%d")
-        c["next_action"] = "Wait for response"
-        c["next_date"] = date
-        print(f"{DIM}Set next: {c['next_action']} on {date}{RESET}")
+        db.set_next(c["id"], "Wait for response", date)
+        print(f"{DIM}Set next: Wait for response on {date}{RESET}")
 
-    save_data(data)
+    storage.push_db(db)
     print(f"{GREEN}Sent to {BOLD}{to_addr}{RESET}")
 
 def cmd_add_template(args):
@@ -665,61 +677,69 @@ def cmd_add_template(args):
         print("Usage: crm add template <name>")
         return
     name = args[0]
-    data = load_data()
-    if "templates" not in data["config"]:
-        data["config"]["templates"] = {}
-    templates = data["config"]["templates"]
-    existing = templates.get(name, {"subject": "", "body": ""})
+    db = storage.open_db()
+    try:
+        templates = db.templates()
+        existing = templates.get(name, {"subject": "", "body": ""})
 
-    initial = f"Subject: {existing['subject']}\n\n{existing['body']}"
-    header = [
-        f"Template: {name}",
-        "Format: first line 'Subject: <subject>', blank line, then the body.",
-        "Placeholders: {name} {first_name} {company} {role} {email} {phone}",
-    ]
-    edited = edit_text(initial=initial, header=header)
-    if not edited:
-        print(f"  {DIM}Cancelled.{RESET}")
-        return
+        initial = f"Subject: {existing['subject']}\n\n{existing['body']}"
+        header = [
+            f"Template: {name}",
+            "Format: first line 'Subject: <subject>', blank line, then the body.",
+            "Placeholders: {name} {first_name} {company} {role} {email} {phone}",
+        ]
+        edited = edit_text(initial=initial, header=header)
+        if not edited:
+            print(f"  {DIM}Cancelled.{RESET}")
+            return
 
-    lines = edited.splitlines()
-    if not lines or not lines[0].startswith("Subject: "):
-        print(f"{RED}First line must be: Subject: <subject>{RESET}")
-        return
-    subject = lines[0][len("Subject: "):].strip()
-    idx = 1
-    while idx < len(lines) and not lines[idx].strip():
-        idx += 1
-    body = "\n".join(lines[idx:])
+        lines = edited.splitlines()
+        if not lines or not lines[0].startswith("Subject: "):
+            print(f"{RED}First line must be: Subject: <subject>{RESET}")
+            return
+        subject = lines[0][len("Subject: "):].strip()
+        idx = 1
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        body = "\n".join(lines[idx:])
 
-    templates[name] = {"subject": subject, "body": body}
-    save_data(data)
-    print(f"{GREEN}Saved template: {BOLD}{name}{RESET}")
+        templates[name] = {"subject": subject, "body": body}
+        db.set_config("templates", templates)
+        storage.push_db(db)
+        print(f"{GREEN}Saved template: {BOLD}{name}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_rm_template(args):
     if not args:
         print("Usage: crm rm template <name>")
         return
     name = args[0]
-    data = load_data()
-    templates = data.get("config", {}).get("templates", {})
-    if name not in templates:
-        print(f"Template '{name}' not found.")
-        return
-    del templates[name]
-    save_data(data)
-    print(f"{YELLOW}Removed template: {BOLD}{name}{RESET}")
+    db = storage.open_db()
+    try:
+        templates = db.templates()
+        if name not in templates:
+            print(f"Template '{name}' not found.")
+            return
+        del templates[name]
+        db.set_config("templates", templates)
+        storage.push_db(db)
+        print(f"{YELLOW}Removed template: {BOLD}{name}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_templates(args):
-    from .mail import get_templates
-    data = load_data()
-    templates = get_templates(data)
-    if not templates:
-        print(f"  {DIM}No templates. Add one with: crm add template <name>{RESET}")
-        return
-    print("Templates:")
-    for name, t in sorted(templates.items()):
-        print(f"  {BOLD}{name}{RESET} {DIM}—{RESET} {t.get('subject', '')}")
+    db = storage.open_db()
+    try:
+        templates = db.templates()
+        if not templates:
+            print(f"  {DIM}No templates. Add one with: crm add template <name>{RESET}")
+            return
+        print("Templates:")
+        for name, t in sorted(templates.items()):
+            print(f"  {BOLD}{name}{RESET} {DIM}—{RESET} {t.get('subject', '')}")
+    finally:
+        storage.close_db(db)
 
 def _serialize_message(m):
     """Plain dict for one thread message (no ANSI), JSON-ready."""
@@ -823,13 +843,15 @@ def cmd_thread(args):
     if len(args) > 1:
         print("Usage: crm thread [QUERY] [--full] [--json] [--mime]")
         return
-    data = load_data()
-    imap_cfg = data.get("config", {}).get("imap")
-    if not imap_cfg:
-        print(f"{RED}IMAP not configured. Add config.imap to crm_data.json.{RESET}")
-        return
-
-    c = get_contact(data, args[0] if args else None, "Show thread for which contact?")
+    db = storage.open_db()
+    try:
+        imap_cfg = db.imap()
+        if not imap_cfg:
+            print(f"{RED}IMAP not configured. Add config.imap to crm_data.json.{RESET}")
+            return
+        c = get_contact(db, args[0] if args else None, "Show thread for which contact?")
+    finally:
+        storage.close_db(db)
     if not c:
         return
     if not c.get("email"):
@@ -1036,126 +1058,124 @@ def cmd_done(args):
     if len(args) > 1:
         print("Usage: crm done [QUERY]")
         return
-    data = load_data()
-    c = get_contact(data, args[0] if args else None, "Mark done for which contact?")
-    if not c:
-        return
+    db = storage.open_db()
+    try:
+        c = get_contact(db, args[0] if args else None, "Mark done for which contact?")
+        if not c:
+            return
 
-    action = c.get("next_action", "")
-    date = c.get("next_date", "")
-    if not action:
-        print(f"  {DIM}No action set for {c['name']}.{RESET}")
-        return
+        action = c.get("next_action", "")
+        if not action:
+            print(f"  {DIM}No action set for {c['name']}.{RESET}")
+            return
 
-    stamp = utc_stamp()
-    if "notes" not in c:
-        c["notes"] = []
-    c["notes"].insert(0, {"date": stamp, "text": f"Done: {action}"})
-    c["next_action"] = ""
-    c["next_date"] = ""
-
-    save_data(data)
-    print(f"{GREEN}Completed: {BOLD}{action}{RESET} {DIM}({c['name']}){RESET}")
+        db.add_note(c["id"], f"Done: {action}")
+        db.clear_next(c["id"])
+        storage.push_db(db)
+        print(f"{GREEN}Completed: {BOLD}{action}{RESET} {DIM}({c['name']}){RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_stage(args):
     if len(args) > 2:
         print("Usage: crm stage [QUERY] [STAGE]")
         return
-    data = load_data()
+    db = storage.open_db()
+    try:
+        if args:
+            c = get_contact(db, args[0], "Change stage for which contact?")
+            new_stage = args[1].lower() if len(args) > 1 else None
+        else:
+            c = get_contact(db, None, "Change stage for which contact?")
+            new_stage = None
 
-    if args:
-        c = get_contact(data, args[0], "Change stage for which contact?")
-        new_stage = args[1].lower() if len(args) > 1 else None
-    else:
-        c = get_contact(data, None, "Change stage for which contact?")
-        new_stage = None
-    
-    if not c:
-        return
-    
-    stages = get_stages(data)
-    if not new_stage:
-        new_stage = pick_one(stages, prompt=f"New stage for {c['name']} (current: {c['stage']})")
-        if not new_stage:
+        if not c:
             return
 
-    if new_stage not in stages:
-        print(f"Invalid stage. Use: {', '.join(stages)}")
-        return
-    
-    old_stage = c["stage"]
-    c["stage"] = new_stage
-    
-    stamp = utc_stamp()
-    if "notes" not in c:
-        c["notes"] = []
-    c["notes"].insert(0, {"date": stamp, "text": f"Stage: {old_stage} → {new_stage}"})
-    record_stage_change(c, old_stage, new_stage, stamp)
-    
-    save_data(data)
-    print(f"{BOLD}{c['name']}{RESET}: {DIM}{old_stage}{RESET} → {GREEN}{new_stage}{RESET}")
+        stages = db.stages()
+        if not new_stage:
+            new_stage = pick_one(stages, prompt=f"New stage for {c['name']} (current: {c['stage']})")
+            if not new_stage:
+                return
+
+        if new_stage not in stages:
+            print(f"Invalid stage. Use: {', '.join(stages)}")
+            return
+
+        old_stage = c["stage"]
+        db.update_contact(c["id"], {"stage": new_stage})
+        db.add_note(c["id"], f"Stage: {old_stage} → {new_stage}")
+        db.record_stage_change(c["id"], old_stage, new_stage)
+
+        storage.push_db(db)
+        print(f"{BOLD}{c['name']}{RESET}: {DIM}{old_stage}{RESET} → {GREEN}{new_stage}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_next(args):
     if len(args) > 3:
         print("Usage: crm next [QUERY] \"[ACTION]\" [DATE]")
         print("  Multi-word actions must be quoted: crm next acme \"Send proposal\" +3d")
         return
-    data = load_data()
+    db = storage.open_db()
+    try:
+        if args:
+            c = get_contact(db, args[0], "Set next action for which contact?")
+            action = args[1] if len(args) > 1 else None
+            date = args[2] if len(args) > 2 else None
+        else:
+            c = get_contact(db, None, "Set next action for which contact?")
+            action = None
+            date = None
 
-    if args:
-        c = get_contact(data, args[0], "Set next action for which contact?")
-        action = args[1] if len(args) > 1 else None
-        date = args[2] if len(args) > 2 else None
-    else:
-        c = get_contact(data, None, "Set next action for which contact?")
-        action = None
-        date = None
-    
-    if not c:
-        return
-    
-    if not action or not date:
-        def validate_date(v):
-            if v.startswith("+") and v.endswith("d"):
-                return None
-            try:
-                datetime.strptime(v, "%Y-%m-%d")
-            except ValueError:
-                return "Use YYYY-MM-DD or +Nd"
-            return None
-
-        result = form_edit([
-            {"name": "Action", "value": action or "", "required": True},
-            {"name": "Due date", "value": date or "+7d", "required": True, "validate": validate_date},
-        ], title=f"Next action for {c['name']}")
-        if not result:
-            print(f"  {DIM}Cancelled.{RESET}")
+        if not c:
             return
-        action = result["Action"]
-        date = result["Due date"]
 
-    parsed = parse_date(date, get_tz(data))
-    if parsed is None:
-        return
+        if not action or not date:
+            def validate_date(v):
+                if v.startswith("+") and v.endswith("d"):
+                    return None
+                try:
+                    datetime.strptime(v, "%Y-%m-%d")
+                except ValueError:
+                    return "Use YYYY-MM-DD or +Nd"
+                return None
 
-    c["next_action"] = action
-    c["next_date"] = parsed
-    
-    save_data(data)
-    print(f"{BOLD}{c['name']}{RESET}: next → {c['next_action']} {DIM}({RESET}{GREEN}{c['next_date']}{RESET}{DIM}){RESET}")
+            result = form_edit([
+                {"name": "Action", "value": action or "", "required": True},
+                {"name": "Due date", "value": date or "+7d", "required": True, "validate": validate_date},
+            ], title=f"Next action for {c['name']}")
+            if not result:
+                print(f"  {DIM}Cancelled.{RESET}")
+                return
+            action = result["Action"]
+            date = result["Due date"]
+
+        parsed = parse_date(date, get_tz(db))
+        if parsed is None:
+            return
+
+        db.set_next(c["id"], action, parsed)
+        storage.push_db(db)
+        print(f"{BOLD}{c['name']}{RESET}: next → {action} {DIM}({RESET}{GREEN}{parsed}{RESET}{DIM}){RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_due(args):
     if len(args) > 1:
         print("Usage: crm due [DAYS]")
         return
-    data = load_data()
-    tz = get_tz(data)
-    days = int(args[0]) if args else 7
-    cutoff = (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
-    today = datetime.now(tz).strftime("%Y-%m-%d")
-    overdue, due = bucket_due(data["contacts"], today, cutoff)
+    db = storage.open_db()
+    try:
+        tz = get_tz(db)
+        days = int(args[0]) if args else 7
+        cutoff = (datetime.now(tz) + timedelta(days=days)).strftime("%Y-%m-%d")
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        overdue, due = bucket_due(db.list_contacts(), today, cutoff)
+        stages = db.stages()
+    finally:
+        storage.close_db(db)
 
-    stages = get_stages(data)
     if overdue:
         print(f"\n{RED}{BOLD}OVERDUE ({len(overdue)}){RESET}")
         for c in sorted(overdue, key=lambda x: x["next_date"]):
@@ -1232,81 +1252,72 @@ def cmd_add(args):
         else:
             i += 1
 
-    data = load_data()
-    stages = get_stages(data)
-    sources = get_sources(data)
+    db = storage.open_db()
+    try:
+        stages = db.stages()
+        sources = db.sources()
 
-    def validate_email(v):
-        if v and "@" not in v:
-            return "Must contain @"
-        return None
+        def validate_email(v):
+            if v and "@" not in v:
+                return "Must contain @"
+            return None
 
-    if "name" in flags:
-        # Non-interactive mode
-        email = flags.get("email", "")
-        if validate_email(email):
-            print(f"{RED}Invalid email: {email}{RESET}")
-            return
-        source = flags.get("source", "cold")
-        if source not in sources:
-            print(f"{RED}Invalid source: {source}. Use: {', '.join(sources)}{RESET}")
-            return
-        stage = flags.get("stage", "cold")
-        if stage not in stages:
-            print(f"{RED}Invalid stage: {stage}. Use: {', '.join(stages)}{RESET}")
-            return
-        result = {
-            "Name": flags["name"],
-            "Email": email,
-            "Phone": flags.get("phone", ""),
-            "Company": flags.get("company", ""),
-            "Role": flags.get("role", ""),
-            "Source": source,
-            "Stage": stage,
-        }
-    else:
-        # Interactive form
-        form_fields = [
-            {"name": "Name", "value": "", "required": True},
-            {"name": "Email", "value": "", "validate": validate_email},
-            {"name": "Phone", "value": ""},
-            {"name": "Company", "value": ""},
-            {"name": "Role", "value": ""},
-            {"name": "Source", "value": "cold", "options": sources},
-            {"name": "Stage", "value": "cold", "options": stages},
-        ]
-        result = form_edit(form_fields, title="Add new contact")
-        if not result:
-            print(f"  {DIM}Cancelled.{RESET}")
-            return
+        if "name" in flags:
+            # Non-interactive mode
+            email = flags.get("email", "")
+            if validate_email(email):
+                print(f"{RED}Invalid email: {email}{RESET}")
+                return
+            source = flags.get("source", "cold")
+            if source not in sources:
+                print(f"{RED}Invalid source: {source}. Use: {', '.join(sources)}{RESET}")
+                return
+            stage = flags.get("stage", "cold")
+            if stage not in stages:
+                print(f"{RED}Invalid stage: {stage}. Use: {', '.join(stages)}{RESET}")
+                return
+            result = {
+                "Name": flags["name"],
+                "Email": email,
+                "Phone": flags.get("phone", ""),
+                "Company": flags.get("company", ""),
+                "Role": flags.get("role", ""),
+                "Source": source,
+                "Stage": stage,
+            }
+        else:
+            # Interactive form
+            form_fields = [
+                {"name": "Name", "value": "", "required": True},
+                {"name": "Email", "value": "", "validate": validate_email},
+                {"name": "Phone", "value": ""},
+                {"name": "Company", "value": ""},
+                {"name": "Role", "value": ""},
+                {"name": "Source", "value": "cold", "options": sources},
+                {"name": "Stage", "value": "cold", "options": stages},
+            ]
+            result = form_edit(form_fields, title="Add new contact")
+            if not result:
+                print(f"  {DIM}Cancelled.{RESET}")
+                return
 
-    # Check for duplicates
-    dupes = [c for c in data["contacts"] if c["name"].lower() == result["Name"].lower()]
-    if dupes:
-        print(f"  {YELLOW}Warning: '{dupes[0]['name']}' ({dupes[0].get('company', '')}) already exists.{RESET}")
-        if not prompt_confirm("Continue anyway?"):
-            print(f"  {DIM}Cancelled.{RESET}")
-            return
+        # Check for duplicates
+        dupes = [c for c in db.list_contacts() if c["name"].lower() == result["Name"].lower()]
+        if dupes:
+            print(f"  {YELLOW}Warning: '{dupes[0]['name']}' ({dupes[0].get('company', '')}) already exists.{RESET}")
+            if not prompt_confirm("Continue anyway?"):
+                print(f"  {DIM}Cancelled.{RESET}")
+                return
 
-    stamp = utc_stamp()
-
-    contact = {
-        "name": result["Name"],
-        "email": result["Email"],
-        "phone": result["Phone"],
-        "company": result["Company"],
-        "role": result["Role"],
-        "source": result["Source"],
-        "stage": result["Stage"],
-        "next_action": "",
-        "next_date": "",
-        "notes": [{"date": stamp, "text": "Added to CRM"}],
-        "stage_history": [{"date": stamp, "from": "", "to": result["Stage"]}],
-    }
-
-    data["contacts"].append(contact)
-    save_data(data)
-    print(f"{GREEN}Added {BOLD}{contact['name']}{RESET}")
+        contact = db.add_contact({
+            "name": result["Name"], "email": result["Email"], "phone": result["Phone"],
+            "company": result["Company"], "role": result["Role"],
+            "source": result["Source"], "stage": result["Stage"],
+        })
+        storage.push_db(db)
+        print(f"{GREEN}Added {BOLD}{contact['name']}{RESET}")
+    finally:
+        storage.close_db(db)
 
 
 # Role/system addresses that aren't people worth tracking.
@@ -1342,7 +1353,7 @@ def _is_ignored(email, ignore_set):
     return em in ignore_set or ("@" + em.split("@")[-1]) in ignore_set
 
 
-def import_candidates(data, recipients):
+def import_candidates(db, recipients):
     """Filter raw Sent-folder recipients down to importable contacts.
 
     Drops your own address, existing contacts, role addresses, and anything
@@ -1350,12 +1361,11 @@ def import_candidates(data, recipients):
     and the web UI so both apply identical rules. Returns a list of
     {"email", "name", "company"} dicts.
     """
-    cfg = data.get("config", {})
-    imap_cfg = cfg.get("imap", {}) or {}
-    own = {imap_cfg.get("user", "").lower(),
-           cfg.get("smtp", {}).get("user", "").lower()}
-    existing = {c.get("email", "").lower() for c in data["contacts"] if c.get("email")}
-    ignore_set = {e.lower() for e in cfg.get("import_ignore", [])}
+    imap_cfg = db.imap() or {}
+    smtp_cfg = db.smtp() or {}
+    own = {imap_cfg.get("user", "").lower(), smtp_cfg.get("user", "").lower()}
+    existing = {c.get("email", "").lower() for c in db.list_contacts() if c.get("email")}
+    ignore_set = {e.lower() for e in db.get_config("import_ignore", [])}
 
     out = []
     for r in recipients:
@@ -1369,8 +1379,6 @@ def import_candidates(data, recipients):
 
 def cmd_import(args):
     """Seed contacts from people you've emailed (Sent folder), via IMAP."""
-    from .mail import fetch_sent_recipients
-
     flags = {}
     i = 0
     while i < len(args):
@@ -1383,14 +1391,22 @@ def cmd_import(args):
         else:
             i += 1
 
-    data = load_data()
-    imap_cfg = data.get("config", {}).get("imap")
+    db = storage.open_db()
+    try:
+        _import_run(db, flags)
+    finally:
+        storage.close_db(db)
+
+
+def _import_run(db, flags):
+    from .mail import fetch_sent_recipients
+    imap_cfg = db.imap()
     if not imap_cfg:
         print(f"{RED}IMAP not configured. Add config.imap to use import.{RESET}")
         return
 
-    stages = get_stages(data)
-    sources = get_sources(data)
+    stages = db.stages()
+    sources = db.sources()
     stage = flags.get("stage", "contacted")
     source = flags.get("source", "cold")
     if stage not in stages:
@@ -1412,7 +1428,7 @@ def cmd_import(args):
         print(f"{RED}Import failed: {e}{RESET}")
         return
 
-    candidates = import_candidates(data, recipients)
+    candidates = import_candidates(db, recipients)
 
     if not candidates:
         print(f"{DIM}No new contacts found in sent mail.{RESET}")
@@ -1468,25 +1484,23 @@ def cmd_import(args):
                 continue
             result = edited
 
-        data["contacts"].append({
+        db.add_contact({
             "name": result["Name"], "email": result["Email"], "phone": result["Phone"],
             "company": result["Company"], "role": result["Role"],
             "source": result["Source"], "stage": result["Stage"],
-            "next_action": "", "next_date": "",
-            "notes": [{"date": utc_stamp(), "text": "Imported from sent mail"}],
-            "stage_history": [{"date": utc_stamp(), "from": "", "to": result["Stage"]}],
-        })
+        }, note_text="Imported from sent mail")
         added += 1
         print(f"  {GREEN}Added.{RESET}")
 
     if newly_ignored:
-        lst = data.setdefault("config", {}).setdefault("import_ignore", [])
+        lst = db.get_config("import_ignore", [])
         for em in newly_ignored:
             if em not in lst:
                 lst.append(em)
+        db.set_config("import_ignore", lst)
 
     if added or newly_ignored:
-        save_data(data)
+        storage.push_db(db)
     msg = f"\n{GREEN}Imported {added} contact(s).{RESET}"
     if newly_ignored:
         msg += f" {DIM}Added {len(newly_ignored)} to the ignore list.{RESET}"
@@ -1514,67 +1528,72 @@ def cmd_edit(args):
         else:
             i += 1
 
-    data = load_data()
-    c = get_contact(data, query, "Edit which contact?")
-    if not c:
-        return
-
-    stages = get_stages(data)
-    sources = get_sources(data)
-
-    def validate_email(v):
-        if v and "@" not in v:
-            return "Must contain @"
-        return None
-
-    if flags:
-        # Non-interactive mode — apply flags directly
-        field_map = {"name": "name", "email": "email", "phone": "phone",
-                     "company": "company", "role": "role", "source": "source", "stage": "stage"}
-        for key, val in flags.items():
-            if key not in field_map:
-                print(f"{RED}Unknown field: {key}{RESET}")
-                return
-            if key == "email" and validate_email(val):
-                print(f"{RED}Invalid email: {val}{RESET}")
-                return
-            if key == "source" and val not in sources:
-                print(f"{RED}Invalid source: {val}. Use: {', '.join(sources)}{RESET}")
-                return
-            if key == "stage" and val not in stages:
-                print(f"{RED}Invalid stage: {val}. Use: {', '.join(stages)}{RESET}")
-                return
-            c[field_map[key]] = val
-    else:
-        # Interactive form
-        form_fields = [
-            {"name": "Name", "value": c.get("name", ""), "required": True},
-            {"name": "Email", "value": c.get("email", ""), "validate": validate_email},
-            {"name": "Phone", "value": c.get("phone", "")},
-            {"name": "Company", "value": c.get("company", "")},
-            {"name": "Role", "value": c.get("role", "")},
-            {"name": "Source", "value": c.get("source", "cold"), "options": sources},
-            {"name": "Stage", "value": c.get("stage", "cold"), "options": stages},
-        ]
-        result = form_edit(form_fields, title=f"Edit {c['name']}")
-        if not result:
-            print(f"  {DIM}Cancelled.{RESET}")
+    db = storage.open_db()
+    try:
+        c = get_contact(db, query, "Edit which contact?")
+        if not c:
             return
-        c["name"] = result["Name"]
-        c["email"] = result["Email"]
-        c["phone"] = result["Phone"]
-        c["company"] = result["Company"]
-        c["role"] = result["Role"]
-        c["source"] = result["Source"]
-        # `crm edit --stage` writes no note (unlike `crm stage`), so it used to
-        # leave no trace; record it structurally so the Timeline stays exact.
-        _old_stage = c.get("stage")
-        c["stage"] = result["Stage"]
-        if result["Stage"] != _old_stage:
-            record_stage_change(c, _old_stage, result["Stage"], utc_stamp())
 
-    save_data(data)
-    print(f"{GREEN}Updated {BOLD}{c['name']}{RESET}")
+        stages = db.stages()
+        sources = db.sources()
+
+        def validate_email(v):
+            if v and "@" not in v:
+                return "Must contain @"
+            return None
+
+        old_stage = c.get("stage")
+        updates = {}
+        if flags:
+            # Non-interactive mode — apply flags directly
+            field_map = {"name": "name", "email": "email", "phone": "phone",
+                         "company": "company", "role": "role", "source": "source", "stage": "stage"}
+            for key, val in flags.items():
+                if key not in field_map:
+                    print(f"{RED}Unknown field: {key}{RESET}")
+                    return
+                if key == "email" and validate_email(val):
+                    print(f"{RED}Invalid email: {val}{RESET}")
+                    return
+                if key == "source" and val not in sources:
+                    print(f"{RED}Invalid source: {val}. Use: {', '.join(sources)}{RESET}")
+                    return
+                if key == "stage" and val not in stages:
+                    print(f"{RED}Invalid stage: {val}. Use: {', '.join(stages)}{RESET}")
+                    return
+                updates[field_map[key]] = val
+        else:
+            # Interactive form
+            form_fields = [
+                {"name": "Name", "value": c.get("name", ""), "required": True},
+                {"name": "Email", "value": c.get("email", ""), "validate": validate_email},
+                {"name": "Phone", "value": c.get("phone", "")},
+                {"name": "Company", "value": c.get("company", "")},
+                {"name": "Role", "value": c.get("role", "")},
+                {"name": "Source", "value": c.get("source", "cold"), "options": sources},
+                {"name": "Stage", "value": c.get("stage", "cold"), "options": stages},
+            ]
+            result = form_edit(form_fields, title=f"Edit {c['name']}")
+            if not result:
+                print(f"  {DIM}Cancelled.{RESET}")
+                return
+            updates = {
+                "name": result["Name"], "email": result["Email"], "phone": result["Phone"],
+                "company": result["Company"], "role": result["Role"],
+                "source": result["Source"], "stage": result["Stage"],
+            }
+
+        db.update_contact(c["id"], updates)
+        new_stage = updates.get("stage", old_stage)
+        # `crm edit --stage` writes no note (unlike `crm stage`), but records the
+        # change structurally so the Timeline stays exact.
+        if "stage" in updates and new_stage != old_stage:
+            db.record_stage_change(c["id"], old_stage, new_stage)
+
+        storage.push_db(db)
+        print(f"{GREEN}Updated {BOLD}{updates.get('name', c['name'])}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_rm(args):
     if not args:
@@ -1595,219 +1614,242 @@ def cmd_rm(args):
     if force:
         rest = [a for a in rest if a != "-y"]
 
-    data = load_data()
-    c = get_contact(data, rest[0] if rest else None, "Remove which contact?")
-    if not c:
-        return
+    db = storage.open_db()
+    try:
+        c = get_contact(db, rest[0] if rest else None, "Remove which contact?")
+        if not c:
+            return
 
-    if not force and not prompt_confirm(f"Remove {BOLD}{c['name']}{RESET} ({c['company']})?"):
-        print(f"  {DIM}Cancelled.{RESET}")
-        return
-    
-    data["contacts"].remove(c)
-    stamp = utc_stamp()
-    c["removed_at"] = stamp
-    data["removed"].append(c)
-    save_data(data)
-    print(f"{YELLOW}Removed {BOLD}{c['name']}{RESET}")
+        if not force and not prompt_confirm(f"Remove {BOLD}{c['name']}{RESET} ({c['company']})?"):
+            print(f"  {DIM}Cancelled.{RESET}")
+            return
+
+        db.remove_contact(c["id"])
+        storage.push_db(db)
+        print(f"{YELLOW}Removed {BOLD}{c['name']}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_restore(args):
     if len(args) > 1:
         print("Usage: crm restore [QUERY]")
         return
-    data = load_data()
-    removed = data.get("removed", [])
-    if not removed:
-        print("No removed contacts.")
-        return
+    db = storage.open_db()
+    try:
+        removed = db.list_removed()
+        if not removed:
+            print("No removed contacts.")
+            return
 
-    if args:
-        query = args[0].lower()
-        matches = [c for c in removed if query in c["name"].lower() or query in c["company"].lower()]
-    else:
-        matches = removed
+        if args:
+            query = args[0].lower()
+            matches = [c for c in removed if query in c["name"].lower() or query in c["company"].lower()]
+        else:
+            matches = removed
 
-    if not matches:
-        print(f"No removed contacts matching '{args[0]}'")
-        return
+        if not matches:
+            print(f"No removed contacts matching '{args[0]}'")
+            return
 
-    def format_removed(c):
-        ra = display_stamp(c.get('removed_at', '?'), data)
-        return f"{c['name']} ({c['company']}) [removed {ra}]"
+        def format_removed(c):
+            ra = display_stamp(c.get('removed_at', '?'), db)
+            return f"{c['name']} ({c['company']}) [removed {ra}]"
 
-    if len(matches) == 1:
-        c = matches[0]
-    else:
-        c = pick_one(matches, prompt=f"Restore which contact? ({len(matches)} removed)", format_fn=format_removed)
+        if len(matches) == 1:
+            c = matches[0]
+        else:
+            c = pick_one(matches, prompt=f"Restore which contact? ({len(matches)} removed)", format_fn=format_removed)
 
-    if not c:
-        return
+        if not c:
+            return
 
-    dupes = [x for x in data["contacts"] if x["name"].lower() == c["name"].lower() and x["company"].lower() == c["company"].lower()]
-    if dupes:
-        print(f"{c['name']} ({c['company']}) already exists in contacts.")
-        return
+        dupes = [x for x in db.list_contacts()
+                 if x["name"].lower() == c["name"].lower() and x["company"].lower() == c["company"].lower()]
+        if dupes:
+            print(f"{c['name']} ({c['company']}) already exists in contacts.")
+            return
 
-    data["removed"].remove(c)
-    del c["removed_at"]
-    data["contacts"].append(c)
-    save_data(data)
-    print(f"{GREEN}Restored {BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{DIM}){RESET}")
+        db.restore_contact(c["id"])
+        storage.push_db(db)
+        print(f"{GREEN}Restored {BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{DIM}){RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_config(args):
     if args and args[0] == "edit":
         return cmd_config_edit(args[1:])
 
-    data = load_data()
+    db = storage.open_db()
+    try:
+        cfg = db.all_config()
 
-    cfg = data["config"]
-
-    if not args:
-        if not cfg:
-            print("No config set.")
-            return
-        for k, v in cfg.items():
-            print(f"  {k} = {v}")
-        return
-
-    key = args[0]
-
-    if len(args) == 1:
-        if key in cfg:
-            print(f"  {key} = {cfg[key]}")
-        else:
-            print(f"  {key} not set")
-        return
-
-    # Set
-    value = " ".join(args[1:])
-
-    if key == "timezone":
-        try:
-            _parse_tz(value)
-        except (ValueError, IndexError):
-            print(f"Invalid timezone: {value}. Use format like UTC+03:00")
+        if not args:
+            if not cfg:
+                print("No config set.")
+                return
+            for k, v in cfg.items():
+                print(f"  {k} = {v}")
             return
 
-    cfg[key] = value
-    data["config"] = cfg
-    save_data(data)
-    print(f"  {key} = {value}")
+        key = args[0]
+
+        if len(args) == 1:
+            if key in cfg:
+                print(f"  {key} = {cfg[key]}")
+            else:
+                print(f"  {key} not set")
+            return
+
+        # Set
+        value = " ".join(args[1:])
+
+        if key == "timezone":
+            try:
+                _parse_tz(value)
+            except (ValueError, IndexError):
+                print(f"Invalid timezone: {value}. Use format like UTC+03:00")
+                return
+
+        db.set_config(key, value)
+        storage.push_db(db)
+        print(f"  {key} = {value}")
+    finally:
+        storage.close_db(db)
 
 
 def cmd_config_edit(args):
     """Edit the whole config block as JSON in $EDITOR.
 
-    Round-trips through load_data/save_data, so it works against any backend
-    (local file or S3) — the only practical way to add nested blocks like the
-    smtp/imap oauth-ms config when the data lives in S3.
+    Works against any backend (local file or S3) — the only practical way to add
+    nested blocks like the smtp/imap oauth-ms config when the data lives in S3.
     """
-    data = load_data()
-    cfg = data.get("config", {})
+    db = storage.open_db()
+    try:
+        cfg = db.all_config()
 
-    initial = json.dumps(cfg, indent=2, ensure_ascii=False)
-    header = [
-        "Edit the config block below as JSON, then save and exit.",
-        "It must be a single JSON object. Empty file cancels.",
-    ]
-    while True:
-        edited = edit_text(initial=initial, header=header)
-        if edited is None:
-            print(f"  {DIM}Cancelled — config unchanged.{RESET}")
-            return
-        try:
-            new_cfg = json.loads(edited)
-        except json.JSONDecodeError as e:
-            print(f"{RED}Invalid JSON: {e}{RESET}")
-            if not sys.stdin.isatty() or not prompt_confirm("Re-open editor to fix?", default=True):
-                print(f"  {DIM}Config unchanged.{RESET}")
+        initial = json.dumps(cfg, indent=2, ensure_ascii=False)
+        header = [
+            "Edit the config block below as JSON, then save and exit.",
+            "It must be a single JSON object. Empty file cancels.",
+        ]
+        while True:
+            edited = edit_text(initial=initial, header=header)
+            if edited is None:
+                print(f"  {DIM}Cancelled — config unchanged.{RESET}")
                 return
-            initial, header = edited, [f"JSON error: {e}", "Fix and save, or empty to cancel."]
-            continue
-        if not isinstance(new_cfg, dict):
-            print(f"{RED}Config must be a JSON object (got {type(new_cfg).__name__}).{RESET}")
+            try:
+                new_cfg = json.loads(edited)
+            except json.JSONDecodeError as e:
+                print(f"{RED}Invalid JSON: {e}{RESET}")
+                if not sys.stdin.isatty() or not prompt_confirm("Re-open editor to fix?", default=True):
+                    print(f"  {DIM}Config unchanged.{RESET}")
+                    return
+                initial, header = edited, [f"JSON error: {e}", "Fix and save, or empty to cancel."]
+                continue
+            if not isinstance(new_cfg, dict):
+                print(f"{RED}Config must be a JSON object (got {type(new_cfg).__name__}).{RESET}")
+                return
+            break
+
+        if new_cfg == cfg:
+            print(f"  {DIM}No changes.{RESET}")
             return
-        break
 
-    if new_cfg == cfg:
-        print(f"  {DIM}No changes.{RESET}")
-        return
-
-    data["config"] = new_cfg
-    save_data(data)
-    print(f"{GREEN}Config updated.{RESET}")
+        db.replace_config(new_cfg)
+        storage.push_db(db)
+        print(f"{GREEN}Config updated.{RESET}")
+    finally:
+        storage.close_db(db)
 
 
 def cmd_stages(args):
-    data = load_data()
-    stages = get_stages(data)
-    print("Stages:")
-    for s in stages:
-        print(f"  {s}")
+    db = storage.open_db()
+    try:
+        print("Stages:")
+        for s in db.stages():
+            print(f"  {s}")
+    finally:
+        storage.close_db(db)
 
 def cmd_add_stage(args):
     if not args:
         print("Usage: crm add stage <name>")
         return
-    data = load_data()
-    stages = get_stages(data)
-    name = args[0].lower()
-    if name in stages:
-        print(f"Stage '{name}' already exists.")
-        return
-    stages.append(name)
-    save_data(data)
-    print(f"{GREEN}Added stage: {BOLD}{name}{RESET}")
+    db = storage.open_db()
+    try:
+        stages = db.stages()
+        name = args[0].lower()
+        if name in stages:
+            print(f"Stage '{name}' already exists.")
+            return
+        stages.append(name)
+        db.set_config("stages", stages)
+        storage.push_db(db)
+        print(f"{GREEN}Added stage: {BOLD}{name}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_rm_stage(args):
     if not args:
         print("Usage: crm rm stage <name>")
         return
-    data = load_data()
-    stages = get_stages(data)
-    name = args[0].lower()
-    if name not in stages:
-        print(f"Stage '{name}' not found.")
-        return
-    in_use = [c for c in data["contacts"] if c["stage"] == name]
-    if in_use:
-        print(f"Can't remove '{name}' — {len(in_use)} contact(s) in this stage.")
-        return
-    stages.remove(name)
-    save_data(data)
-    print(f"{YELLOW}Removed stage: {BOLD}{name}{RESET}")
+    db = storage.open_db()
+    try:
+        stages = db.stages()
+        name = args[0].lower()
+        if name not in stages:
+            print(f"Stage '{name}' not found.")
+            return
+        in_use = [c for c in db.list_contacts() if c["stage"] == name]
+        if in_use:
+            print(f"Can't remove '{name}' — {len(in_use)} contact(s) in this stage.")
+            return
+        stages.remove(name)
+        db.set_config("stages", stages)
+        storage.push_db(db)
+        print(f"{YELLOW}Removed stage: {BOLD}{name}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_add_source(args):
     if not args:
         print("Usage: crm add source <name>")
         return
-    data = load_data()
-    sources = get_sources(data)
-    name = args[0].lower()
-    if name in sources:
-        print(f"Source '{name}' already exists.")
-        return
-    sources.append(name)
-    save_data(data)
-    print(f"{GREEN}Added source: {BOLD}{name}{RESET}")
+    db = storage.open_db()
+    try:
+        sources = db.sources()
+        name = args[0].lower()
+        if name in sources:
+            print(f"Source '{name}' already exists.")
+            return
+        sources.append(name)
+        db.set_config("sources", sources)
+        storage.push_db(db)
+        print(f"{GREEN}Added source: {BOLD}{name}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_rm_source(args):
     if not args:
         print("Usage: crm rm source <name>")
         return
-    data = load_data()
-    sources = get_sources(data)
-    name = args[0].lower()
-    if name not in sources:
-        print(f"Source '{name}' not found.")
-        return
-    in_use = [c for c in data["contacts"] if c.get("source") == name]
-    if in_use:
-        print(f"Can't remove '{name}' — {len(in_use)} contact(s) with this source.")
-        return
-    sources.remove(name)
-    save_data(data)
-    print(f"{YELLOW}Removed source: {BOLD}{name}{RESET}")
+    db = storage.open_db()
+    try:
+        sources = db.sources()
+        name = args[0].lower()
+        if name not in sources:
+            print(f"Source '{name}' not found.")
+            return
+        in_use = [c for c in db.list_contacts() if c.get("source") == name]
+        if in_use:
+            print(f"Can't remove '{name}' — {len(in_use)} contact(s) with this source.")
+            return
+        sources.remove(name)
+        db.set_config("sources", sources)
+        storage.push_db(db)
+        print(f"{YELLOW}Removed source: {BOLD}{name}{RESET}")
+    finally:
+        storage.close_db(db)
 
 def cmd_search(args):
     if not args:
@@ -1817,27 +1859,30 @@ def cmd_search(args):
     else:
         term = " ".join(args)
 
-    data = load_data()
-    results = search_contacts(
-        data["contacts"],
-        term,
-        stamp_fmt=lambda d: display_stamp(d, data),
-    )
+    db = storage.open_db()
+    try:
+        results = search_contacts(
+            db.list_contacts(),
+            term,
+            stamp_fmt=lambda d: display_stamp(d, db),
+        )
 
-    if not results:
-        print(f"No results for '{term.lower()}'")
-        return
+        if not results:
+            print(f"No results for '{term.lower()}'")
+            return
 
-    stages = get_stages(data)
-    print(f"\n{BOLD}Found {len(results)} contact(s):{RESET}\n")
-    for c, matches in results:
-        sc = stage_color(c['stage'], stages)
-        print(f"{BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{DIM}){RESET} {sc}[{c['stage'].upper()}]{RESET}")
-        for m in matches[:3]:
-            print(f"    {DIM}→{RESET} {m}")
-        if len(matches) > 3:
-            print(f"    {DIM}→ ...and {len(matches) - 3} more{RESET}")
-        print()
+        stages = db.stages()
+        print(f"\n{BOLD}Found {len(results)} contact(s):{RESET}\n")
+        for c, matches in results:
+            sc = stage_color(c['stage'], stages)
+            print(f"{BOLD}{c['name']}{RESET} {DIM}({RESET}{c['company']}{DIM}){RESET} {sc}[{c['stage'].upper()}]{RESET}")
+            for m in matches[:3]:
+                print(f"    {DIM}→{RESET} {m}")
+            if len(matches) > 3:
+                print(f"    {DIM}→ ...and {len(matches) - 3} more{RESET}")
+            print()
+    finally:
+        storage.close_db(db)
 
 HELP = {
     "list":    "crm list [STAGE]\n  List contacts grouped by stage. Optionally filter by stage name.",
@@ -1890,11 +1935,18 @@ def cmd_help(args):
         print(f"No help for '{topic}'")
 
 def cmd_dashboard(args):
-    data = load_data()
-    stages = get_stages(data)
-    tz = get_tz(data)
+    db = storage.open_db()
+    try:
+        _dashboard(db)
+    finally:
+        storage.close_db(db)
+
+
+def _dashboard(db):
+    stages = db.stages()
+    tz = get_tz(db)
     today = datetime.now(tz).strftime("%Y-%m-%d")
-    contacts = data["contacts"]
+    contacts = db.list_contacts()
 
     if not contacts:
         print(f"\n{DIM}No contacts yet. Run {RESET}{BOLD}crm add contact{RESET}{DIM} to get started.{RESET}\n")
@@ -2019,10 +2071,13 @@ def main():
         # Show overdue warning (skip for commands that already show it)
         if cmd not in ("due", "help", "stages", "config", "cfg", "where", "path", "update", "serve"):
             try:
-                data = load_data()
-                tz = get_tz(data)
-                today = datetime.now(tz).strftime("%Y-%m-%d")
-                n = sum(1 for c in data["contacts"] if c.get("next_date") and c["next_date"] < today)
+                db = storage.open_db()
+                try:
+                    tz = get_tz(db)
+                    today = datetime.now(tz).strftime("%Y-%m-%d")
+                    n = sum(1 for c in db.list_contacts() if c.get("next_date") and c["next_date"] < today)
+                finally:
+                    storage.close_db(db)
                 if n:
                     print(f"{RED}! {n} overdue contact{'s' if n != 1 else ''}. Run {RESET}crm due{RED} to review.{RESET}")
             except Exception:

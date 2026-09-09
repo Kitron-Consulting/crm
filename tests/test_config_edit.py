@@ -5,23 +5,40 @@ set nested config blocks (e.g. smtp/imap oauth-ms) against any backend.
 import json
 import sys
 
-from crm import cli
+import pytest
+
+from crm import cli, storage
 
 
-def _setup(monkeypatch, initial_cfg, editor_returns):
-    """Wire load_data/save_data/edit_text and capture what gets saved."""
-    data = {"config": dict(initial_cfg), "contacts": []}
-    saved = {}
+@pytest.fixture(autouse=True)
+def _reset_backend():
+    saved = storage._backend
+    yield
+    storage._backend = saved
 
-    monkeypatch.setattr(cli, "load_data", lambda: data)
-    monkeypatch.setattr(cli, "save_data", lambda d: saved.update(d))
+
+def _setup(tmp_path, monkeypatch, initial_cfg, editor_returns):
+    """Seed a temp SQLite backend and stub edit_text with the given editor outputs."""
+    storage.use_local_path(tmp_path / "crm.db")
+    db = storage.open_db()
+    for k, v in initial_cfg.items():
+        db.set_config(k, v)
+    storage.push_db(db)
+    storage.close_db(db)
 
     returns = list(editor_returns)
     monkeypatch.setattr(cli, "edit_text", lambda **kw: returns.pop(0))
-    return data, saved
 
 
-def test_adds_nested_oauth_block(monkeypatch):
+def _cfg():
+    db = storage.open_db()
+    try:
+        return db.all_config()
+    finally:
+        storage.close_db(db)
+
+
+def test_adds_nested_oauth_block(tmp_path, monkeypatch):
     new_cfg = {
         "timezone": "UTC+03:00",
         "smtp": {
@@ -32,53 +49,47 @@ def test_adds_nested_oauth_block(monkeypatch):
             "tenant_id": "t",
         },
     }
-    _, saved = _setup(
-        monkeypatch,
-        {"timezone": "UTC+03:00"},
-        [json.dumps(new_cfg)],
-    )
+    _setup(tmp_path, monkeypatch, {"timezone": "UTC+03:00"}, [json.dumps(new_cfg)])
     cli.cmd_config_edit([])
-    assert saved["config"]["smtp"]["auth"] == "oauth-ms"
-    assert saved["config"]["smtp"]["client_id"] == "c"
+    cfg = _cfg()
+    assert cfg["smtp"]["auth"] == "oauth-ms"
+    assert cfg["smtp"]["client_id"] == "c"
 
 
-def test_cancel_leaves_config_untouched(monkeypatch):
-    _, saved = _setup(monkeypatch, {"timezone": "UTC"}, [None])  # empty editor = cancel
+def test_cancel_leaves_config_untouched(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, {"timezone": "UTC"}, [None])  # empty editor = cancel
     cli.cmd_config_edit([])
-    assert saved == {}  # save_data never called
+    assert _cfg() == {"timezone": "UTC"}
 
 
-def test_no_changes_does_not_save(monkeypatch):
+def test_no_changes_does_not_save(tmp_path, monkeypatch):
     cfg = {"timezone": "UTC", "smtp": {"host": "h"}}
-    _, saved = _setup(monkeypatch, cfg, [json.dumps(cfg)])
+    _setup(tmp_path, monkeypatch, cfg, [json.dumps(cfg)])
     cli.cmd_config_edit([])
-    assert saved == {}
+    assert _cfg() == cfg
 
 
-def test_invalid_json_non_tty_aborts(monkeypatch):
+def test_invalid_json_non_tty_aborts(tmp_path, monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    _, saved = _setup(monkeypatch, {"timezone": "UTC"}, ["{not valid json"])
+    _setup(tmp_path, monkeypatch, {"timezone": "UTC"}, ["{not valid json"])
     cli.cmd_config_edit([])
-    assert saved == {}  # aborted, nothing written
+    assert _cfg() == {"timezone": "UTC"}  # aborted, nothing written
 
 
-def test_invalid_then_fixed_on_reprompt(monkeypatch):
+def test_invalid_then_fixed_on_reprompt(tmp_path, monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cli, "prompt_confirm", lambda *a, **k: True)
     good = {"timezone": "UTC", "imap": {"auth": "oauth-ms"}}
-    _, saved = _setup(
-        monkeypatch,
-        {"timezone": "UTC"},
-        ["{bad json", json.dumps(good)],  # first invalid, then corrected
-    )
+    _setup(tmp_path, monkeypatch, {"timezone": "UTC"},
+           ["{bad json", json.dumps(good)])  # first invalid, then corrected
     cli.cmd_config_edit([])
-    assert saved["config"]["imap"]["auth"] == "oauth-ms"
+    assert _cfg()["imap"]["auth"] == "oauth-ms"
 
 
-def test_non_object_json_rejected(monkeypatch):
-    _, saved = _setup(monkeypatch, {"timezone": "UTC"}, [json.dumps([1, 2, 3])])
+def test_non_object_json_rejected(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, {"timezone": "UTC"}, [json.dumps([1, 2, 3])])
     cli.cmd_config_edit([])
-    assert saved == {}
+    assert _cfg() == {"timezone": "UTC"}
 
 
 def test_edit_routed_through_cmd_config(monkeypatch):

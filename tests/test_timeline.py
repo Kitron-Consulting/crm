@@ -73,28 +73,35 @@ def test_structured_history_wins_over_notes():
 
 # --- web integration ----------------------------------------------------------
 
+def _db(contact):
+    from crm.db import Db
+    db = Db.open_memory()
+    db.import_json({"config": {"timezone": "UTC+02:00", "stages": ["cold", "contacted"],
+                               "sources": ["cold"]},
+                    "contacts": [contact], "removed": []})
+    return db
+
+
 def test_web_state_exposes_segments_and_localised_history():
     from crm import web
-    data = {"contacts": [{"name": "Ada", "email": "", "stage": "contacted", "source": "cold",
-                          "next_action": "", "next_date": "",
-                          "notes": [{"date": "2026-08-20 23:30", "text": "Added to CRM"}],
-                          "stage_history": [{"date": "2026-08-31 23:30", "from": "cold", "to": "contacted"}]}],
-            "removed": [], "config": {"timezone": "UTC+02:00", "stages": ["cold", "contacted"], "sources": ["cold"]}}
-    c = web.build_state(data)["contacts"][0]
+    db = _db({"name": "Ada", "email": "", "stage": "contacted", "source": "cold",
+              "next_action": "", "next_date": "",
+              "notes": [{"date": "2026-08-20 23:30", "text": "Added to CRM"}],
+              "stage_history": [{"date": "2026-08-31 23:30", "from": "cold", "to": "contacted"}]})
+    c = web.build_state(db)["contacts"][0]
     # UTC 23:30 -> local next day 01:30; segments use local days
     assert c["stage_history"][0]["date"] == "2026-09-01 01:30"
     assert c["segments"] == [{"stage": "cold", "start": "2026-08-21", "end": "2026-09-01"},
                              {"stage": "contacted", "start": "2026-09-01", "end": None}]
-    assert "segments" not in data["contacts"][0]   # stored data untouched
+    assert "segments" not in db.get_contact(1)   # stored data untouched
 
 
 def test_web_update_records_structured_history():
     from crm import web
-    data = {"contacts": [{"name": "Ada", "email": "", "stage": "cold", "source": "cold",
-                          "next_action": "", "next_date": "", "notes": []}],
-            "removed": [], "config": {"timezone": "UTC+02:00", "stages": ["cold", "contacted"], "sources": ["cold"]}}
-    web.api_update_contact(data, {"id": 0, "name": "Ada", "fields": {"stage": "contacted"}})
-    h = data["contacts"][0]["stage_history"]
+    db = _db({"name": "Ada", "email": "", "stage": "cold", "source": "cold",
+              "next_action": "", "next_date": "", "notes": [], "stage_history": []})
+    web.api_update_contact(db, {"id": 1, "name": "Ada", "fields": {"stage": "contacted"}})
+    h = db.get_contact(1)["stage_history"]
     assert len(h) == 1 and h[0]["from"] == "cold" and h[0]["to"] == "contacted" and len(h[0]["date"]) == 16
-    web.api_update_contact(data, {"id": 0, "name": "Ada", "fields": {"role": "CTO"}})   # no stage change
-    assert len(data["contacts"][0]["stage_history"]) == 1
+    web.api_update_contact(db, {"id": 1, "name": "Ada", "fields": {"role": "CTO"}})   # no stage change
+    assert len(db.get_contact(1)["stage_history"]) == 1
