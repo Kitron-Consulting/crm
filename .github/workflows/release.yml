@@ -22,8 +22,21 @@ jobs:
       - name: Check for undefined names
         run: ruff check --select F821 crm
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package + pytest
+        run: pip install -e . pytest
+      - name: Run tests
+        run: pytest -q
+
   linux:
-    needs: lint
+    needs: [lint, test]
     runs-on: ubuntu-latest
     # python:3.12-bullseye = Debian 11, glibc 2.31. PyApp's Rust binary
     # links against the build-host glibc; building here means the binary
@@ -80,7 +93,7 @@ jobs:
           files: dist/crm-linux-x86_64
 
   macos:
-    needs: lint
+    needs: [lint, test]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
