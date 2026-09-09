@@ -16,6 +16,7 @@ export const STUCK_DAYS = 30
 
 export const S = $state({
   contacts: [],
+  accounts: [], // [{id, name, domain, notes, contact_count}] — the org a contact belongs to
   stages: [],
   sources: [],
   today: '',
@@ -41,6 +42,9 @@ export const UI = $state({
   filters: { stages: [], source: '', overdue: false, noNext: false },
   sort: { key: 'name', dir: 1 },
   drawer: { id: null, tab: 'details', editingNext: false },
+  // Account detail panel (opened from a contact). Mutually exclusive with the
+  // contact drawer — opening one closes the other.
+  account: { id: null },
   // Calendar view: shown month ("YYYY-MM") and selected day for the agenda;
   // empty = today. Not persisted.
   cal: { month: '', selected: '' },
@@ -54,6 +58,10 @@ export const threadCache = $state({})
 
 // ---------- domain helpers ----------
 export const byId = (id) => S.contacts.find((c) => c.id === id)
+export const accountById = (id) => S.accounts.find((a) => a.id === id)
+/** Active contacts linked to an account, name-sorted. */
+export const contactsInAccount = (accountId) =>
+  S.contacts.filter((c) => c.account_id === accountId).sort((a, b) => cmpStr(a.name, b.name))
 
 export function daysUntil(iso) {
   const a = Date.parse(S.today + 'T00:00:00')
@@ -222,6 +230,22 @@ export function closeDrawer() {
   UI.drawer = { id: null, tab: 'details', editingNext: false }
 }
 
+// ---------- account panel ----------
+export function openAccount(id) {
+  if (id == null) return
+  closeDrawer() // the two panels are mutually exclusive
+  UI.account = { id }
+}
+
+export function closeAccount() {
+  UI.account = { id: null }
+}
+
+/** Edit an account (name/domain/notes); a rename cascades to contacts server-side. */
+export async function updateAccount(id, fields) {
+  return mutate('/api/accounts/update', { id, fields }, 'Account saved')
+}
+
 // ---------- calendar ----------
 export const calMonth = () => UI.cal.month || (S.today || '').slice(0, 7)
 export const calSelected = () => UI.cal.selected || S.today
@@ -247,6 +271,7 @@ export async function loadState() {
   try {
     const j = await api('/api/state')
     S.contacts = j.contacts || []
+    S.accounts = j.accounts || []
     S.stages = j.stages || []
     S.sources = j.sources || []
     S.today = j.today || ''

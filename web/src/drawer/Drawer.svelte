@@ -7,7 +7,7 @@
   import FieldsBlock from './FieldsBlock.svelte'
   import NotesBlock from './NotesBlock.svelte'
   import ThreadBlock from './ThreadBlock.svelte'
-  import { S, UI, byId, closeDrawer, mutate, subline, stageStyle, meetingWhen } from '../lib/store.svelte.js'
+  import { S, UI, byId, closeDrawer, mutate, subline, stageStyle, meetingWhen, openAccount, contactsInAccount } from '../lib/store.svelte.js'
   import { confirmDialog } from '../lib/modal.svelte.js'
 
   const open = $derived(UI.drawer.id !== null)
@@ -79,6 +79,15 @@
         {#if UI.drawer.tab === 'thread'}
           <ThreadBlock contact={c} />
         {:else}
+          {#if c.account_id && c.company}
+            {@const others = contactsInAccount(c.account_id).length - 1}
+            <button type="button" class="acc-link" onclick={() => openAccount(c.account_id)}>
+              <Icon name="user" size={13} />
+              <span class="acc-link-name">{c.company}</span>
+              <span class="muted">{others > 0 ? others + (others === 1 ? ' other here' : ' others here') : 'account'}</span>
+              <Icon name="open" size={13} />
+            </button>
+          {/if}
           <NextBlock contact={c} />
           {#if c.next_meeting}
             {@const w = meetingWhen(c.next_meeting)}

@@ -11,8 +11,9 @@
   import Calendar from './views/Calendar.svelte'
   import Timeline from './views/Timeline.svelte'
   import Drawer from './drawer/Drawer.svelte'
+  import AccountDrawer from './drawer/AccountDrawer.svelte'
   import { TOKEN } from './lib/api.js'
-  import { UI, VIEWS, setView, loadState, clearSearch, closeDrawer, calShift, calToday } from './lib/store.svelte.js'
+  import { UI, VIEWS, setView, loadState, clearSearch, closeDrawer, closeAccount, calShift, calToday } from './lib/store.svelte.js'
   import { modal, closeModal, newContactDialog } from './lib/modal.svelte.js'
   import { preview, closePreview } from './lib/preview.svelte.js'
   import AttachmentPreview from './components/AttachmentPreview.svelte'
@@ -36,6 +37,7 @@
     if (e.key === 'Escape') {
       if (preview.item) return closePreview()
       if (modal.kind) return closeModal()
+      if (UI.account.id !== null) return closeAccount()
       if (UI.drawer.id !== null) return closeDrawer()
       if (UI.q || UI.qInput) clearSearch()
       if (typing) t.blur()
@@ -117,6 +119,7 @@
     </div>
   </div>
   <Drawer />
+  <AccountDrawer />
   {#if modal.kind}<Modal />{/if}
   {#if preview.item}<AttachmentPreview />{/if}
   <Toasts />

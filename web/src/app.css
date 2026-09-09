@@ -390,6 +390,23 @@ body.dragging-any .cal-chip, body.dragging-any .cal-urow { transition:none; }
 .dr-meeting-title { font-weight:600; }
 .dr-meeting-when { font-size:13px; color:var(--ink-2); font-variant-numeric:tabular-nums; }
 .dr-meeting a.btn { margin-top:6px; }
+/* account link on a contact + the account panel */
+.acc-link { display:flex; align-items:center; gap:8px; width:100%; padding:9px 12px; border-radius:var(--r);
+            border:1px solid var(--line); background:var(--surface-2); color:var(--ink); cursor:pointer;
+            font:inherit; font-size:13px; }
+.acc-link:hover { border-color:var(--accent); }
+.acc-link-name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.acc-link .muted { margin-left:auto; font-size:12px; white-space:nowrap; }
+.acc-fields { display:flex; flex-direction:column; gap:12px; }
+.acc-notes { height:auto; min-height:74px; padding:8px 10px; line-height:1.5; resize:vertical; font-family:inherit; }
+.acc-save { display:flex; }
+.acc-contacts { display:flex; flex-direction:column; gap:2px; margin-top:8px; }
+.acc-row { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:var(--r); border:0;
+           background:transparent; cursor:pointer; font:inherit; text-align:left; width:100%; }
+.acc-row:hover { background:var(--surface-2); }
+.acc-row .name { font-weight:600; font-size:13px; }
+.acc-row .muted { font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.acc-row .chip { margin-left:auto; }
 .block-title { display:flex; align-items:center; justify-content:space-between; font-size:11px; font-weight:600;
                text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:8px; }
 .next-card { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:12px 14px;
