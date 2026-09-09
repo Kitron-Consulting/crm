@@ -3,14 +3,42 @@
 Snapshot for continuing on another machine. Delete this file before the eventual
 v1.9.0 merge to `main`.
 
+## ⚠️ Storage is now SQLite (big-bang migration — done)
+The JSON-blob store is gone. The store is a single **SQLite `.db` file**
+(`crm/db.py` = the `Db` DAL; `crm/storage` = blob-sync backends). `load_data`/
+`save_data` are replaced by `storage.open_db()` / `push_db(db)` / `close_db(db)`
+sessions; all CLI commands + the web API use `db.*` queries. Contacts have
+**stable integer PKs** now (id=1-based, not list position). Config is a kv table.
+- **S3 unchanged in spirit**: the `.db` is pushed/pulled whole with the same
+  `If-Match` ETag concurrency. A legacy JSON blob **auto-upgrades in place** on
+  first open (magic-byte sniff → migrate → SQLite bytes to the same key; a
+  `.jsonbak` backup is kept locally). So your real S3 data upgrades itself the
+  first time any device writes — **nothing to run**, but the first write is the
+  migration; let it happen from one device before hammering others.
+- `sqlite3` is stdlib → no new runtime dep. `msal` is now declared in pyproject.
+- Tests: `pytest -q` → **161 green**. New: `test_db.py`, `test_storage.py`,
+  `test_meetings.py`. `test_web.py`/`test_import.py`/etc. rewritten onto the DAL.
+
+## "Next meeting" on cards — done (one live-mailbox caveat)
+Contact cards (Board) show a blue **meeting chip**; the drawer Details tab shows
+a **Next meeting** block with a Join link. Backed by a synced `meetings` table
+(`db.set_meetings`/`next_meetings`), populated by `mail.fetch_upcoming_meetings`
+(scans Inbox+Sent, correlates by counterparty email). A **"Sync meetings"**
+button on the Board calls `POST /api/meetings/refresh`.
+- ⚠️ **The scan is the ONE thing not tested against a real mailbox** — I never
+  touch live data. The pure folding + DAL + endpoint are unit-tested (mocked
+  IMAP); the actual `fetch_upcoming_meetings` IMAP walk needs a real session.
+  Click "Sync meetings" against your Exchange box and sanity-check the results
+  (counterparty attribution, dedupe, future-only) before trusting it.
+
 ## How to continue on the laptop
 ```bash
 git fetch && git checkout feature/web-ui
 
 # Python (CLI + server): 3.13 venv, install with uv
 uv venv --python python3.13 .venv
-uv pip install --python .venv/bin/python -e . msal pytest
-.venv/bin/python -m pytest -q            # expect all green
+uv pip install --python .venv/bin/python -e . pytest   # msal now in pyproject
+.venv/bin/python -m pytest -q            # expect 161 green
 
 # Web UI: Node 22, build the single-file bundle the server serves
 cd web && npm ci && npm run build        # -> crm/static/index.html (gitignored)
