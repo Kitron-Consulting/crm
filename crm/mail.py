@@ -835,10 +835,34 @@ def upcoming_meetings(pairs, now_str):
     return sorted(seen.values(), key=lambda m: m["start"])
 
 
+# A BODYSTRUCTURE (lowercased) names a calendar part like `"text" "calendar"`
+# or carries an `.ics` attachment filename — a cheap, reliable "this is an
+# invite" signal without downloading the message body.
+_CAL_HINT_RE = re.compile(rb'"calendar"|\.ics')
+
+
+def _calendar_candidates(imap, nums):
+    """From a set of message numbers, return only those whose BODYSTRUCTURE has a
+    calendar part — one cheap batched metadata fetch instead of N body downloads."""
+    typ, meta = imap.fetch(b",".join(nums), "(BODYSTRUCTURE)")
+    if typ != "OK" or not meta:
+        return list(nums)  # can't pre-filter → fall back to scanning all
+    out = []
+    for item in meta:
+        raw = item[0] if isinstance(item, tuple) else item
+        if not raw:
+            continue
+        m = re.match(rb"\s*(\d+)\s+\(", raw)
+        if m and _CAL_HINT_RE.search(raw.lower()):
+            out.append(m.group(1))
+    return out
+
+
 def _scan_folder_events(imap, folder, direction, tz, since, limit):
     """Yield (counterparty_email, event) for recent messages in `folder` that
     carry a calendar event. `direction` picks the counterparty side: inbound
-    reads From, outbound reads To."""
+    reads From, outbound reads To. Only invite-looking messages (calendar part)
+    are body-fetched, so a large mailbox stays fast."""
     out = []
     try:
         typ, _ = imap.select(_imap_mailbox(folder), readonly=True)
@@ -847,7 +871,10 @@ def _scan_folder_events(imap, folder, direction, tz, since, limit):
         typ, data = imap.search(None, "SINCE", since) if since else imap.search(None, "ALL")
         if typ != "OK" or not data or not data[0]:
             return out
-        for num in data[0].split()[-limit:]:
+        nums = data[0].split()[-limit:]
+        if not nums:
+            return out
+        for num in _calendar_candidates(imap, nums):
             typ, fetched = imap.fetch(num, "(RFC822)")
             if typ != "OK" or not fetched or not isinstance(fetched[0], tuple):
                 continue

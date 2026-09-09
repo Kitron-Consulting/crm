@@ -38,6 +38,30 @@ def test_upcoming_meetings_dedupes_and_sorts():
     assert [m["summary"] for m in out] == ["Earlier", "Kickoff"]  # sorted by start, deduped
 
 
+# ---------------- scan pre-filter ----------------
+
+class _FakeImap:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def fetch(self, nset, what):
+        return self.resp
+
+
+def test_calendar_candidates_keeps_only_invite_messages():
+    imap = _FakeImap(("OK", [
+        b'1 (BODYSTRUCTURE (("TEXT" "PLAIN" NIL NIL NIL "7BIT" 10 1)("TEXT" "CALENDAR" ("METHOD" "REQUEST") NIL NIL "7BIT" 500 8) "MIXED"))',
+        b'2 (BODYSTRUCTURE ("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 120 6))',
+        b'3 (BODYSTRUCTURE (("TEXT" "HTML" NIL NIL NIL "7BIT" 90 3)("APPLICATION" "OCTET-STREAM" ("NAME" "invite.ics") NIL NIL "BASE64" 800 11) "MIXED"))',
+    ]))
+    assert mail._calendar_candidates(imap, [b'1', b'2', b'3']) == [b'1', b'3']
+
+
+def test_calendar_candidates_falls_back_when_fetch_fails():
+    imap = _FakeImap(("NO", None))
+    assert mail._calendar_candidates(imap, [b'1', b'2']) == [b'1', b'2']
+
+
 # ---------------- DAL cache ----------------
 
 def _db():
