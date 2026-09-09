@@ -7,7 +7,7 @@
   import FieldsBlock from './FieldsBlock.svelte'
   import NotesBlock from './NotesBlock.svelte'
   import ThreadBlock from './ThreadBlock.svelte'
-  import { S, UI, byId, closeDrawer, mutate, subline, stageStyle } from '../lib/store.svelte.js'
+  import { S, UI, byId, closeDrawer, mutate, subline, stageStyle, meetingWhen } from '../lib/store.svelte.js'
   import { confirmDialog } from '../lib/modal.svelte.js'
 
   const open = $derived(UI.drawer.id !== null)
@@ -80,6 +80,20 @@
           <ThreadBlock contact={c} />
         {:else}
           <NextBlock contact={c} />
+          {#if c.next_meeting}
+            {@const w = meetingWhen(c.next_meeting)}
+            <section class="dr-meeting">
+              <div class="dr-meeting-head"><Icon name="calendar" size={13} />Next meeting</div>
+              <div class="dr-meeting-title">{c.next_meeting.summary || 'Meeting'}</div>
+              <div class="dr-meeting-when">{w.day}{w.time ? ' · ' + w.time : ''}{w.rel ? ' · ' + w.rel : ''}</div>
+              {#if c.next_meeting.location}<div class="muted" style="font-size:12px">{c.next_meeting.location}</div>{/if}
+              {#if c.next_meeting.join_url}
+                <a class="btn sm" href={c.next_meeting.join_url} target="_blank" rel="noopener noreferrer">
+                  <Icon name="open" size={13} />Join{c.next_meeting.provider ? ' ' + c.next_meeting.provider : ''}
+                </a>
+              {/if}
+            </section>
+          {/if}
           <FieldsBlock contact={c} />
           <NotesBlock contact={c} />
         {/if}

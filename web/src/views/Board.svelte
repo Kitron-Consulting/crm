@@ -4,11 +4,22 @@
   import FiltersBar from '../components/FiltersBar.svelte'
   import StageChip from '../components/StageChip.svelte'
   import NextChip from '../components/NextChip.svelte'
+  import MeetingChip from '../components/MeetingChip.svelte'
   import EmptyState from '../components/EmptyState.svelte'
   import ErrorBox from '../components/ErrorBox.svelte'
   import Icon from '../components/Icon.svelte'
-  import { S, visibleContacts, byId, mutate, openDrawer, setView, loadState, stageStyle, subline } from '../lib/store.svelte.js'
+  import { S, visibleContacts, byId, mutate, openDrawer, setView, loadState, stageStyle, subline, refreshMeetings } from '../lib/store.svelte.js'
   import { newContactDialog } from '../lib/modal.svelte.js'
+
+  let syncing = $state(false)
+  async function syncMeetings() {
+    syncing = true
+    try {
+      await refreshMeetings()
+    } finally {
+      syncing = false
+    }
+  }
 
   let dragId = $state(null)
   let dropStage = $state(null)
@@ -76,7 +87,12 @@
     {/each}
   </div>
 {:else}
-  <ViewHead title="Board" sub={S.today ? 'Today is ' + S.today : ''} />
+  <ViewHead title="Board" sub={S.today ? 'Today is ' + S.today : ''}>
+    <button class="btn sm" class:busy={syncing} disabled={syncing} onclick={syncMeetings}
+            title={S.meetingsFetchedAt ? 'Meetings last synced ' + S.meetingsFetchedAt : 'Scan mail for upcoming meetings'}>
+      <Icon name="calendar" size={14} />{syncing ? 'Syncing…' : 'Sync meetings'}
+    </button>
+  </ViewHead>
   <FiltersBar shown={list.length} />
   {#if !S.contacts.length}
     <EmptyState title="No contacts yet" hint="Add your first contact, or import people you've emailed.">
@@ -120,8 +136,11 @@
               >
                 <div class="card-name" title={c.name}>{c.name || '(no name)'}</div>
                 {#if sub}<div class="card-sub" title={sub}>{sub}</div>{/if}
-                {#if c.next_action || c.next_date}
-                  <div class="card-foot"><NextChip contact={c} /></div>
+                {#if c.next_action || c.next_date || c.next_meeting}
+                  <div class="card-foot">
+                    {#if c.next_action || c.next_date}<NextChip contact={c} />{/if}
+                    <MeetingChip contact={c} />
+                  </div>
                 {/if}
               </div>
             {/each}

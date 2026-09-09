@@ -94,6 +94,10 @@ select.ctl { padding-right:28px; cursor:pointer; }
 .chip.next .chip-date { font-variant-numeric:tabular-nums; opacity:.9; }
 .chip.next.soon { background:var(--warn-soft); color:var(--warn); border-color:transparent; }
 .chip.next.overdue { background:var(--danger-soft); color:var(--danger); border-color:transparent; }
+.chip.meeting { background:var(--accent-soft); color:var(--accent); border:1px solid transparent; }
+.chip.meeting .chip-date { font-variant-numeric:tabular-nums; }
+.chip.meeting .chip-rel { opacity:.7; }
+.chip.meeting.soon { font-weight:600; }
 .date { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
 .date.overdue { color:var(--danger); font-weight:600; }
 .date.soon { color:var(--warn); font-weight:600; }
@@ -184,7 +188,7 @@ main { padding:24px; flex:1; min-width:0; min-height:0; overflow:auto; display:f
 .card.dragging { opacity:.4; transform:rotate(1.5deg) scale(.98); }
 .card-name { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .card-sub { color:var(--muted); font-size:12px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.card-foot { margin-top:8px; display:flex; }
+.card-foot { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; }
 body.dragging-any .card { transition:none; }
 
 /* ---------- table ---------- */
@@ -379,6 +383,13 @@ body.dragging-any .cal-chip, body.dragging-any .cal-urow { transition:none; }
 .tab:hover { color:var(--ink); }
 .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
 .dr-body { flex:1; overflow-y:auto; padding:18px 20px 24px; display:flex; flex-direction:column; gap:22px; }
+.dr-meeting { border-radius:var(--r); padding:12px 14px; display:flex; flex-direction:column; gap:4px;
+              align-items:flex-start; background:var(--accent-soft); }
+.dr-meeting-head { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:600; color:var(--accent);
+                   text-transform:uppercase; letter-spacing:.04em; }
+.dr-meeting-title { font-weight:600; }
+.dr-meeting-when { font-size:13px; color:var(--ink-2); font-variant-numeric:tabular-nums; }
+.dr-meeting a.btn { margin-top:6px; }
 .block-title { display:flex; align-items:center; justify-content:space-between; font-size:11px; font-weight:600;
                text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin-bottom:8px; }
 .next-card { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:12px 14px;

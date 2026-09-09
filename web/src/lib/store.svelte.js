@@ -19,6 +19,7 @@ export const S = $state({
   stages: [],
   sources: [],
   today: '',
+  meetingsFetchedAt: '', // when the meetings cache was last refreshed from mail
   loaded: false,
   error: null,
 })
@@ -85,6 +86,20 @@ export function dateWithRel(iso) {
 }
 
 export const hasNext = (c) => !!(c.next_action || c.next_date)
+
+/**
+ * Format a cached meeting (`c.next_meeting`) for display:
+ * { day: "Fri 12 Sep", time: "09:00" | "", rel: "today"|"tomorrow"|"in 3d"|"",
+ *   soon: boolean }. `start` is a local "YYYY-MM-DD HH:MM" (or date-only when all-day).
+ */
+export function meetingWhen(m) {
+  if (!m || !m.start) return null
+  const [d, t = ''] = m.start.split(' ')
+  const dt = new Date(d + 'T00:00:00')
+  const day = isNaN(dt) ? d : dt.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+  const n = daysUntil(d)
+  return { day, time: m.all_day ? '' : t, rel: relDue(d), soon: !isNaN(n) && n >= 0 && n <= 7 }
+}
 
 /** Hue/saturation for a stage: by position in the configured list, with won/lost/dormant fixed. */
 export function stageStyle(stage) {
@@ -235,6 +250,7 @@ export async function loadState() {
     S.stages = j.stages || []
     S.sources = j.sources || []
     S.today = j.today || ''
+    S.meetingsFetchedAt = j.meetings_fetched_at || ''
     S.loaded = true
     S.error = null
   } catch (e) {
@@ -260,6 +276,16 @@ export async function mutate(path, body, okMsg) {
     } else toast(e.message, 'error')
     return null
   }
+}
+
+/**
+ * Rescan the mailbox for upcoming meetings and rebuild the (synced) cache.
+ * Reloads state on success so cards pick up the new `next_meeting`.
+ */
+export async function refreshMeetings() {
+  const r = await mutate('/api/meetings/refresh', {}, null)
+  if (r) toast(`Synced ${r.count} upcoming meeting${r.count === 1 ? '' : 's'}`, 'ok')
+  return r
 }
 
 export async function loadThread(email) {
