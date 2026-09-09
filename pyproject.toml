@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Eemil Kiviahde", email = "eemil.kiviahde@kitron.dev" }]
 dependencies = [
+    "msal>=1.38.0",
     "requests>=2.31",
     "requests-aws4auth>=1.2",
 ]
